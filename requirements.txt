@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+google-auth
+asyncpg
+python-jose[cryptography]
+python-dotenv
+pydantic
+requests

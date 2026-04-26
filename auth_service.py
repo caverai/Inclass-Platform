@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -154,6 +155,39 @@ async def fetch_user_by_email(pool: asyncpg.Pool, email: str) -> asyncpg.Record:
     logger.info("User found: id=%s role=%s", row["id"], row["role"])
     return row
 
+
+async def fetch_registered_student_by_email(
+    pool: asyncpg.Pool,
+    email: str,
+) -> asyncpg.Record:
+    """
+    Student-only counterpart for auth verification.
+    Uses the already-verified Google school email and ensures there is an
+    active student record in `users`.
+    """
+    query = """
+        SELECT id, school_email, role, created_at
+        FROM   users
+        WHERE  school_email = $1
+          AND  role = 'student'
+        LIMIT  1
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(query, email.lower())
+
+    if row is None:
+        logger.warning("Student auth rejected; no student record for email=%s", email)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No registered student account was found for this school email. "
+                "Please contact your instructor or platform administrator."
+            ),
+        )
+
+    logger.info("Student verified: id=%s email=%s", row["id"], row["school_email"])
+    return row
+
 # #TASK-101 | Step 4: Issue a signed JWT session token
 
 def create_access_token(user_id: str, email: str, role: str) -> str:
@@ -220,6 +254,40 @@ async def google_sign_in(body: GoogleTokenRequest) -> AuthResponse:
         email=user["school_email"],
     )
 
+
+@app.post(
+    "/auth/google/student",
+    response_model=AuthResponse,
+    summary="Google Sign-In (Student)",
+    tags=["Authentication"],
+)
+async def google_student_sign_in(body: GoogleTokenRequest) -> AuthResponse:
+    """
+    Student auth flow for US-B / US-C support.
+    1) Verify Google ID token
+    2) Enforce school domain
+    3) Ensure email maps to a registered student in `users`
+    4) Return JWT
+    """
+    claims = verify_google_id_token(body.id_token)
+    email: str = claims.get("email", "")
+
+    enforce_school_email(email)
+    student = await fetch_registered_student_by_email(app.state.db_pool, email)
+
+    access_token = create_access_token(
+        user_id=str(student["id"]),
+        email=student["school_email"],
+        role=student["role"],
+    )
+
+    return AuthResponse(
+        access_token=access_token,
+        user_id=str(student["id"]),
+        role=student["role"],
+        email=student["school_email"],
+    )
+
 # #TASK-101 | Optional: token introspection helper for other services
 
 bearer_scheme = HTTPBearer()
@@ -264,6 +332,115 @@ async def get_current_user(payload: dict = Depends(decode_access_token)) -> dict
         "email":   payload["email"],
         "role":    payload["role"],
     }
+
+
+@app.get(
+    "/health/db",
+    summary="Database health check",
+    tags=["Health"],
+)
+async def db_health() -> dict:
+    """Lightweight connectivity check for DATABASE_URL / Supabase readiness."""
+    async with app.state.db_pool.acquire() as conn:
+        ok = await conn.fetchval("SELECT 1")
+    return {"database": "ok" if ok == 1 else "unexpected"}
+
+
+@app.get(
+        "/auth/google/student/test",
+        response_class=HTMLResponse,
+        summary="Google student sign-in test page",
+        tags=["Authentication"],
+)
+def google_student_sign_in_test_page() -> HTMLResponse:
+        """Simple browser test page to get a Google ID token and call student auth."""
+        html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>InClass Student Google Sign-In Test</title>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <style>
+        body {{
+            font-family: Segoe UI, Arial, sans-serif;
+            max-width: 760px;
+            margin: 40px auto;
+            padding: 0 16px;
+            line-height: 1.45;
+        }}
+        .panel {{
+            border: 1px solid #d9d9d9;
+            border-radius: 10px;
+            padding: 16px;
+            margin-top: 16px;
+            background: #fafafa;
+        }}
+        pre {{
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 8px;
+            padding: 12px;
+            min-height: 84px;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Student Google Sign-In Test</h1>
+    <p>Use your school Google account. This page sends the Google ID token to <strong>/auth/google/student</strong>.</p>
+
+    <div class="panel">
+        <div id="g_id_onload"
+                 data-client_id="{GOOGLE_CLIENT_ID}"
+                 data-callback="handleCredentialResponse"
+                 data-auto_prompt="false">
+        </div>
+        <div class="g_id_signin"
+                 data-type="standard"
+                 data-size="large"
+                 data-theme="outline"
+                 data-text="signin_with"
+                 data-shape="pill"
+                 data-logo_alignment="left">
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3>Backend Response</h3>
+        <pre id="result">Waiting for sign-in...</pre>
+    </div>
+
+    <script>
+        async function handleCredentialResponse(response) {{
+            const resultEl = document.getElementById('result');
+            resultEl.textContent = 'Google token received. Calling backend...';
+
+            try {{
+                const apiResponse = await fetch('/auth/google/student', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ id_token: response.credential }})
+                }});
+
+                const data = await apiResponse.json();
+                resultEl.textContent = JSON.stringify({{
+                    status: apiResponse.status,
+                    ok: apiResponse.ok,
+                    data: data
+                }}, null, 2);
+            }} catch (error) {{
+                resultEl.textContent = 'Request failed: ' + String(error);
+            }}
+        }}
+        window.handleCredentialResponse = handleCredentialResponse;
+    </script>
+</body>
+</html>
+"""
+        return HTMLResponse(content=html)
 
 # Entry point (local dev only — use `uvicorn auth_service:app` in production)
 
