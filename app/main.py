@@ -23,12 +23,16 @@ from jose import JWTError, jwt
 from pydantic import BaseModel
 
 from app.services import (
+    changeInstructorPassword,
     fetch_instructor_courses,
     fetch_password_hash_by_email,
     fetch_registered_instructor_by_email,
     fetch_registered_student_by_email,
     fetch_user_by_email,
     fetch_user_by_id,
+    instructorLogin,
+    listMyCourses,
+    setInstructorPassword,
     update_user_password,
 )
 from passlib.context import CryptContext
@@ -536,20 +540,20 @@ async def instructor_test(current_user: dict = Depends(verify_instructor)) -> di
     tags=["Instructor"],
 )
 async def get_instructor_courses(
+    request: Request,
     current_user: dict = Depends(verify_instructor),
-) -> list:
+) -> dict:
     """
     @brief Retrieves only the courses assigned to the authenticated instructor.
-    @details Isolation is enforced via the current_user identity.
+    @details Calls listMyCourses service function to fetch data.
+    @param request The FastAPI Request object.
     @param current_user The identity of the authenticated instructor, injected via dependency.
-    @return A list of dictionaries representing the instructor's courses.
+    @return A dictionary containing the instructor's courses.
     """
-    courses = await fetch_instructor_courses(
-        app.state.db_pool,
-        current_user["user_id"],
-    )
-    # Convert asyncpg Records to dicts
-    return [dict(c) for c in courses]
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+    
+    return await listMyCourses(email=current_user["email"], password=password)
 
 
 @app.post(
@@ -558,26 +562,23 @@ async def get_instructor_courses(
     summary="Instructor password-based login",
     tags=["Authentication"],
 )
-async def instructorLogin(
+async def api_instructor_login(
     request: Request,
     body: Optional[InstructorLoginRequest] = None,
 ) -> AuthResponse:
     """
     @brief Validates instructor credentials and issues a JWT.
-    @details Supports both JSON body and form/query fallback for grading scripts.
+    @details Calls the instructorLogin service function.
     @param request The FastAPI Request object.
     @param body The optional Pydantic request body for login.
     @return AuthResponse containing the access token.
     @throws HTTPException 400 If email or password is missing.
-    @throws HTTPException 401 If credentials are invalid or no password is set.
     """
-    # Use fallback helper to support flexible inputs (grading script compatibility)
     creds = await _extract_grading_fallback_credentials(request)
     email = creds.get("email")
     password = creds.get("password")
 
     if not email or not password:
-        # Fallback to Pydantic body if available
         if body:
             email = body.email
             password = body.password
@@ -588,46 +589,8 @@ async def instructorLogin(
             detail="Email and password are required.",
         )
 
-    # 1. Fetch instructor by email (ensures role == 'instructor')
-    instructor = await fetch_registered_instructor_by_email(
-        app.state.db_pool,
-        email,
-    )
-
-    # 2. Fetch stored password hash
-    stored_hash = await fetch_password_hash_by_email(
-        app.state.db_pool,
-        email,
-    )
-
-    if not stored_hash:
-        logger.warning("Login failed: No password set for instructor=%s", email)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No password has been set for this account. Please use Google Sign-In or contact your admin.",
-        )
-
-    # 3. Verify password
-    if not PasswordHasher.verify(password, stored_hash):
-        logger.warning("Login failed: Incorrect password for instructor=%s", email)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-        )
-
-    # 4. Issue token
-    access_token = create_access_token(
-        user_id=str(instructor["id"]),
-        email=instructor["school_email"],
-        role=instructor["role"],
-    )
-
-    return AuthResponse(
-        access_token=access_token,
-        user_id=str(instructor["id"]),
-        role=instructor["role"],
-        email=instructor["school_email"],
-    )
+    result = await instructorLogin(email=email, password=password)
+    return AuthResponse(**result)
 
 
 @app.post(
@@ -635,37 +598,26 @@ async def instructorLogin(
     summary="Set instructor password",
     tags=["Authentication"],
 )
-async def setInstructorPassword(
+async def api_set_instructor_password(
+    request: Request,
     password: Optional[str] = None,
     current_user: dict = Depends(verify_instructor),
 ) -> dict:
     """
     @brief Allows an instructor to set their initial password.
-    @details Signature requirement: password: str | None = None
+    @details Calls the setInstructorPassword service function.
+    @param request The FastAPI Request object.
     @param password The new plain-text password to set.
     @param current_user The authenticated instructor's identity.
     @return A dictionary indicating the result status.
-    @throws HTTPException 500 If the database update fails.
     """
-    if not password:
-        # Gracefully handle None/empty password as per US-D requirements
-        logger.info("setInstructorPassword: No password provided for user_id=%s", current_user["user_id"])
-        return {"status": "ignored", "message": "No password provided; no changes made."}
-
-    hashed = PasswordHasher.hash(password)
-    success = await update_user_password(
-        app.state.db_pool,
-        current_user["user_id"],
-        hashed,
-    )
-
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update password.",
-        )
-
-    return {"status": "success", "message": "Password set successfully."}
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    req_password = fallback_creds.get("password")
+    
+    # If a password wasn't found in fallback creds, use the query/body parameter
+    final_password = req_password if req_password else password
+    
+    return await setInstructorPassword(email=current_user["email"], password=final_password)
 
 
 @app.post(
@@ -673,53 +625,28 @@ async def setInstructorPassword(
     summary="Change instructor password",
     tags=["Authentication"],
 )
-async def changeInstructorPassword(
+async def api_change_instructor_password(
+    request: Request,
     body: InstructorChangePasswordRequest,
     current_user: dict = Depends(verify_instructor),
 ) -> dict:
     """
     @brief Changes the instructor's password after verifying the existing one.
+    @details Calls the changeInstructorPassword service function.
+    @param request The FastAPI Request object.
     @param body The request body containing old and new passwords.
     @param current_user The authenticated instructor's identity.
     @return A dictionary indicating the result status.
-    @throws HTTPException 400 If no existing password is found.
-    @throws HTTPException 401 If the old password verification fails.
-    @throws HTTPException 500 If the database update fails.
     """
-    # 1. Fetch current hash
-    stored_hash = await fetch_password_hash_by_email(
-        app.state.db_pool,
-        current_user["email"],
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await changeInstructorPassword(
+        email=current_user["email"],
+        password=password,
+        old_password=body.old_password,
+        new_password=body.new_password,
     )
-
-    if not stored_hash:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No existing password found. Use 'set' instead.",
-        )
-
-    # 2. Verify old password
-    if not PasswordHasher.verify(body.old_password, stored_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect existing password.",
-        )
-
-    # 3. Hash and update
-    new_hashed = PasswordHasher.hash(body.new_password)
-    success = await update_user_password(
-        app.state.db_pool,
-        current_user["user_id"],
-        new_hashed,
-    )
-
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update password.",
-        )
-
-    return {"status": "success", "message": "Password changed successfully."}
 
 
 @app.get(

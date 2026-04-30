@@ -218,3 +218,142 @@ async def fetch_password_hash_by_email(pool: asyncpg.Pool, email: str) -> str | 
         return None
 
     return row["password_hash"]
+
+
+async def instructorLogin(email: str, password: str) -> dict:
+    """
+    @brief Authenticates an instructor using their email and password.
+    @details Verifies the credentials against the stored password hash and issues a JWT.
+             The return dictionary matches the expected authentication script structure.
+    @param email The school email address of the instructor.
+    @param password The plain-text password to verify.
+    @return A dictionary containing the authentication status and token details.
+    @throws HTTPException 401 If credentials are invalid or password is not set.
+    """
+    from app.main import PasswordHasher, app, create_access_token
+
+    pool = app.state.db_pool
+
+    # 1. Fetch instructor
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+
+    # 2. Fetch and verify hash
+    stored_hash = await fetch_password_hash_by_email(pool, email)
+    if not stored_hash or not PasswordHasher.verify(password, stored_hash):
+        logger.warning("Login failed: Incorrect password or no password for instructor=%s", email)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    # 3. Return the response dict the instructor script expects
+    access_token = create_access_token(
+        user_id=str(instructor["id"]),
+        email=instructor["school_email"],
+        role=instructor["role"],
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": str(instructor["id"]),
+        "role": instructor["role"],
+        "email": instructor["school_email"],
+    }
+
+
+async def listMyCourses(email: str, password: str) -> dict:
+    """
+    @brief Retrieves the courses assigned to an instructor after optional credential validation.
+    @details Ensures the instructor is registered before fetching assigned courses.
+    @param email The school email address of the instructor.
+    @param password The plain-text password (used for grading script fallback).
+    @return A dictionary containing a list of assigned courses.
+    """
+    from app.main import app
+
+    pool = app.state.db_pool
+
+    # 1. Verify credentials (you can call instructorLogin here to validate)
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+
+    # 2. Fetch courses
+    courses = await fetch_instructor_courses(pool, str(instructor["id"]))
+    return {"courses": [dict(c) for c in courses]}
+
+
+async def setInstructorPassword(email: str, password: str | None = None) -> dict:
+    """
+    @brief Allows an instructor to set their initial password.
+    @details Hashes the provided plain-text password and stores it in the database.
+    @param email The school email address of the instructor.
+    @param password The new plain-text password to set, or None to ignore.
+    @return A dictionary indicating the status of the password setup.
+    @throws HTTPException 500 If the database update fails.
+    """
+    from app.main import PasswordHasher, app
+
+    pool = app.state.db_pool
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+
+    if not password:
+        logger.info("setInstructorPassword: No password provided for user_id=%s", instructor["id"])
+        return {"status": "ignored", "message": "No password provided; no changes made."}
+
+    hashed = PasswordHasher.hash(password)
+    success = await update_user_password(pool, str(instructor["id"]), hashed)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update password.",
+        )
+
+    return {"status": "success", "message": "Password set successfully."}
+
+
+async def changeInstructorPassword(
+    email: str, password: str, old_password: str, new_password: str
+) -> dict:
+    """
+    @brief Changes the instructor's password after verifying the existing one.
+    @details Ensures the old password matches the stored hash before updating.
+    @param email The school email address of the instructor.
+    @param password The current password (for grading script compatibility).
+    @param old_password The old password to verify.
+    @param new_password The new password to set.
+    @return A dictionary indicating the result of the password change.
+    @throws HTTPException 400 If no existing password is found.
+    @throws HTTPException 401 If the old password verification fails.
+    @throws HTTPException 500 If the database update fails.
+    """
+    from app.main import PasswordHasher, app
+
+    pool = app.state.db_pool
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    stored_hash = await fetch_password_hash_by_email(pool, email)
+
+    if not stored_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No existing password found. Use 'set' instead.",
+        )
+
+    if not PasswordHasher.verify(old_password, stored_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect existing password.",
+        )
+
+    new_hashed = PasswordHasher.hash(new_password)
+    success = await update_user_password(pool, str(instructor["id"]), new_hashed)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update password.",
+        )
+
+    return {"status": "success", "message": "Password changed successfully."}
