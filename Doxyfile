@@ -1,0 +1,53 @@
+# Doxygen Configuration for InClass-Platform
+
+PROJECT_NAME           = "InClass Platform"
+PROJECT_NUMBER         = "1.0.0"
+PROJECT_BRIEF          = "FastAPI-based In-Class Student/Instructor Platform"
+OUTPUT_DIRECTORY       = docs/gen
+
+# Language and Parsing
+OPTIMIZE_OUTPUT_JAVA   = YES
+AUTOLINK_SUPPORT       = YES
+IDL_PROPERTY_SUPPORT   = YES
+SUBGROUPING            = YES
+
+# Input files
+INPUT                  = . app/ services.py main.py README.md
+FILE_PATTERNS          = *.py *.md
+RECURSIVE              = YES
+EXCLUDE                = docs/ .git/ tests/ venv/ .env .env.example
+USE_MDFILE_AS_MAINPAGE = README.md
+
+# Python Docstring Filtering
+# We use doxypypy to convert Python docstrings to Doxygen-compatible blocks
+FILTER_PATTERNS        = "*.py=python -m doxypypy.doxypypy -a -c"
+
+# Extraction Settings
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+HIDE_UNDOC_MEMBERS     = NO
+
+# Modern UI (Doxygen Awesome)
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+HTML_COLORSTYLE        = LIGHT # Theme handles the toggle
+
+# Apply Doxygen Awesome CSS
+HTML_EXTRA_STYLESHEET  = docs/doxygen-awesome-css/doxygen-awesome.css
+HTML_EXTRA_FILES       = docs/doxygen-awesome-css/doxygen-awesome-darkmode-toggle.js
+
+# Customizing the header to include the dark mode toggle
+HTML_HEADER            = docs/header.html
+
+# Graphviz for Diagrams (if available)
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+
+# Disable LaTeX to speed up generation
+GENERATE_LATEX         = NO

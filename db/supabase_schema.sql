@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     school_email TEXT NOT NULL UNIQUE,
     full_name TEXT,
     role TEXT NOT NULL CHECK (role IN ('student', 'instructor', 'admin')),
+    password_hash TEXT,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

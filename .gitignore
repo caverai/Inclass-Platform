@@ -1,3 +1,5 @@
+/docs
+
 .env
 .venv/
 __pycache__/
