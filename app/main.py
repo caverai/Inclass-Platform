@@ -31,7 +31,7 @@ from app.services import (
     JWT_SECRET,
     changeInstructorPassword,
     create_access_token,
-    end_activity,
+    endActivity,
     fetch_instructor_courses,
     fetch_password_hash_by_email,
     fetch_registered_instructor_by_email,
@@ -41,7 +41,7 @@ from app.services import (
     instructorLogin,
     listMyCourses,
     setInstructorPassword,
-    start_activity,
+    startActivity,
     update_user_password,
 )
 
@@ -616,6 +616,7 @@ async def api_change_instructor_password(
     tags=["Instructor"],
 )
 async def api_start_activity(
+    request: Request,
     course_id: str,
     activity_no: int,
     current_user: dict = Depends(verify_instructor),
@@ -630,9 +631,12 @@ async def api_start_activity(
     @throws HTTPException 404 If activity is not found.
     @throws HTTPException 409 If activity is not currently in DRAFT state.
     """
-    return await start_activity(
-        pool=app.state.db_pool,
-        instructor_id=current_user["user_id"],
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await startActivity(
+        email=current_user["email"],
+        password=password,
         course_id=course_id,
         activity_no=activity_no,
     )
@@ -644,6 +648,7 @@ async def api_start_activity(
     tags=["Instructor"],
 )
 async def api_end_activity(
+    request: Request,
     course_id: str,
     activity_no: int,
     current_user: dict = Depends(verify_instructor),
@@ -658,9 +663,12 @@ async def api_end_activity(
     @throws HTTPException 404 If activity is not found.
     @throws HTTPException 409 If activity is not currently in ACTIVE state.
     """
-    return await end_activity(
-        pool=app.state.db_pool,
-        instructor_id=current_user["user_id"],
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await endActivity(
+        email=current_user["email"],
+        password=password,
         course_id=course_id,
         activity_no=activity_no,
     )

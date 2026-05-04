@@ -577,3 +577,55 @@ async def end_activity(
         "activity_no": int(activity_no),
         "activity_status": "ENDED",
     }
+
+
+async def startActivity(
+    email: str,
+    password: str,
+    course_id: str,
+    activity_no: int,
+) -> dict:
+    """
+    @brief Starts an activity by transitioning state from DRAFT to ACTIVE.
+    @details Exact signature required by Phase 1 API Contract.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    return await start_activity(
+        pool=pool,
+        instructor_id=instructor_id,
+        course_id=course_id,
+        activity_no=activity_no,
+    )
+
+
+async def endActivity(
+    email: str,
+    password: str,
+    course_id: str,
+    activity_no: int,
+) -> dict:
+    """
+    @brief Ends an activity by transitioning state from ACTIVE to ENDED.
+    @details Exact signature required by Phase 1 API Contract.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    return await end_activity(
+        pool=pool,
+        instructor_id=instructor_id,
+        course_id=course_id,
+        activity_no=activity_no,
+    )
