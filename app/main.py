@@ -44,6 +44,8 @@ from app.services import (
     setInstructorPassword,
     startActivity,
     update_user_password,
+    updateActivity,
+    submitManualGrade,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -131,7 +133,17 @@ class CreateActivityRequest(BaseModel):
     objectives: list[str]
     title: Optional[str] = None
 
+class UpdateActivityRequest(BaseModel):
+    """Request model for updating an existing course activity (US-G)."""
+    activity_text: Optional[str] = None
+    objectives: Optional[list[str]] = None
+    title: Optional[str] = None
 
+class ManualGradeRequest(BaseModel):
+    """Request model for submitting a manual grade (US-L)."""
+    student_email: str
+    score: float
+    note: str = ""
 
 
 
@@ -837,8 +849,66 @@ def google_student_sign_in_test_page() -> HTMLResponse:
 """
     return HTMLResponse(content=html)
 
+@app.patch(
+    "/instructor/activity/{course_id}/{activity_no}",
+    summary="Update activity content",
+    tags=["Instructor"],
+)
+async def api_update_activity(
+    request: Request,
+    course_id: str,
+    activity_no: int,
+    body: UpdateActivityRequest,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Updates the text, objectives, or title of an activity.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await updateActivity(
+        email=current_user["email"],
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+        activity_text=body.activity_text,
+        objectives=body.objectives,
+        title=body.title
+    )
+
+@app.post(
+    "/instructor/activity/{course_id}/{activity_no}/grade/manual",
+    summary="Submit manual grade",
+    tags=["Instructor"],
+)
+async def api_submit_manual_grade(
+    request: Request,
+    course_id: str,
+    activity_no: int,
+    body: ManualGradeRequest,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Submits an explicit manual score for a student exception.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await submitManualGrade(
+        email=current_user["email"],
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+        student_email=body.student_email,
+        score=body.score,
+        note=body.note
+    )
 
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+    
