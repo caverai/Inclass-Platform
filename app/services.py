@@ -7,6 +7,7 @@
 
 import logging
 import os
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -778,3 +779,144 @@ async def endActivity(
         course_id=course_id,
         activity_no=activity_no,
     )
+
+async def updateActivity(
+    email: str, 
+    password: str, 
+    course_id: str, 
+    activity_no: int, 
+    activity_text: str | None = None, 
+    objectives: list[str] | None = None, 
+    title: str | None = None
+) -> dict:
+    """
+    @brief Updates allowed fields of an activity (US-G).
+    @details Exact signature required by Phase 1 API Contract.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
+
+    # Criteria: Empty patch is rejected
+    if activity_text is None and objectives is None and title is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Empty patch: At least one allowed field must be provided."
+        )
+
+    # Build dynamic update query to only update provided fields
+    updates = []
+    values = [course_id, activity_no]
+    idx = 3
+
+    if activity_text is not None:
+        updates.append(f"description = ${idx}")
+        values.append(activity_text.strip())
+        idx += 1
+
+    if objectives is not None:
+        clean_objectives = _normalize_objectives(objectives)
+        updates.append(f"objectives = ${idx}::jsonb")
+        values.append(json.dumps(clean_objectives))
+        idx += 1
+
+    if title is not None:
+        updates.append(f"title = ${idx}")
+        clean_title = title.strip()[:120] if title.strip() else "Untitled Activity"
+        values.append(clean_title)
+        idx += 1
+
+    set_clause = ", ".join(updates)
+    query = f"""
+        UPDATE activities
+        SET {set_clause}, updated_at = NOW()
+        WHERE course_id::text = $1 AND activity_no = $2
+        RETURNING id
+    """
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(query, *values)
+
+    # Criteria: Non-existent activity returns a clear error
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found.")
+
+    return {
+        "status": "success",
+        "message": f"Activity {activity_no} updated successfully."
+    }
+
+
+async def submitManualGrade(
+    email: str, 
+    password: str, 
+    course_id: str, 
+    activity_no: int, 
+    student_email: str, 
+    score: float, 
+    note: str = ""
+) -> dict:
+    """
+    @brief Submits a manual grade for a student in a specific activity (US-L).
+    @details Exact signature required by Phase 1 API Contract.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    # Criteria: Unauthorized instructor cannot submit manual grade
+    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
+
+    # Verify activity exists
+    activity_query = "SELECT id, max_score FROM activities WHERE course_id::text = $1 AND activity_no = $2"
+    async with pool.acquire() as conn:
+        activity = await conn.fetchrow(activity_query, course_id, activity_no)
+
+    if not activity:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found.")
+
+    # Verify student exists
+    student = await fetch_registered_student_by_email(pool, student_email)
+
+    # Optional but recommended: Verify student is enrolled in the course
+    enrolled_query = "SELECT 1 FROM student_course_mapping WHERE student_id = $1 AND course_id::text = $2"
+    async with pool.acquire() as conn:
+        is_enrolled = await conn.fetchrow(enrolled_query, student["id"], course_id)
+        if not is_enrolled:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Student is not enrolled in this course.")
+
+    # Criteria: Validate score limits
+    if score < 0 or score > activity["max_score"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail=f"Score must be between 0 and the activity maximum ({activity['max_score']})."
+        )
+
+    # Criteria: Log manual grading event (upsert behavior)
+    upsert_query = """
+        INSERT INTO activity_scores (activity_id, student_id, score, grading_type, note)
+        VALUES ($1, $2, $3, 'manual', $4)
+        ON CONFLICT (activity_id, student_id)
+        DO UPDATE SET 
+            score = EXCLUDED.score, 
+            grading_type = 'manual', 
+            note = EXCLUDED.note, 
+            updated_at = NOW()
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(upsert_query, activity["id"], student["id"], score, note)
+
+    return {
+        "status": "success",
+        "message": f"Manual grade of {score} successfully logged for {student_email}."
+    }
