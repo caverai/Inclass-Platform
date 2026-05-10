@@ -30,6 +30,7 @@ from app.services import (
     JWT_ALGORITHM,
     JWT_SECRET,
     changeInstructorPassword,
+    createActivity,
     create_access_token,
     endActivity,
     fetch_instructor_courses,
@@ -117,6 +118,18 @@ class InstructorChangePasswordRequest(BaseModel):
     """
     old_password: str
     new_password: str
+
+
+class CreateActivityRequest(BaseModel):
+    """
+    @brief Request model for creating a course activity.
+    @details US-F requires activity text and objectives; title is optional.
+    """
+    course_id: str
+    activity_no: int
+    activity_text: str
+    objectives: list[str]
+    title: Optional[str] = None
 
 
 
@@ -607,6 +620,40 @@ async def api_change_instructor_password(
         password=password,
         old_password=body.old_password,
         new_password=body.new_password,
+    )
+
+
+@app.post(
+    "/instructor/activity/create",
+    summary="Create a new activity",
+    tags=["Instructor"],
+)
+async def api_create_activity(
+    request: Request,
+    body: CreateActivityRequest,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Creates a new course activity for an authorized instructor.
+    @param request The FastAPI Request object.
+    @param body The request payload containing activity details.
+    @param current_user Authenticated instructor identity from verify_instructor.
+    @return A dictionary describing the created activity.
+    @throws HTTPException 400 If required fields are invalid.
+    @throws HTTPException 403 If instructor-course authorization fails.
+    @throws HTTPException 409 If duplicate activity number exists in the same course.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await createActivity(
+        email=current_user["email"],
+        password=password,
+        course_id=body.course_id,
+        activity_no=body.activity_no,
+        activity_text=body.activity_text,
+        objectives=body.objectives,
+        title=body.title,
     )
 
 

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS activities (
     activity_no INTEGER NOT NULL,
     title TEXT NOT NULL,
     description TEXT,
+    objectives JSONB NOT NULL DEFAULT '[]'::jsonb,
     status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ACTIVE', 'ENDED')),
     starts_at TIMESTAMPTZ,
     due_at TIMESTAMPTZ,
@@ -60,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_mapping_student ON student_course_mapping (studen
 CREATE INDEX IF NOT EXISTS idx_mapping_student_course ON student_course_mapping (course_id);
 CREATE INDEX IF NOT EXISTS idx_activities_course ON activities (course_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_course_no ON activities (course_id, activity_no);
+CREATE INDEX IF NOT EXISTS idx_activities_objectives_gin ON activities USING GIN (objectives);
 
 -- Optional seed for quick smoke test; replace domain/email before use.
 -- INSERT INTO users (school_email, full_name, role)

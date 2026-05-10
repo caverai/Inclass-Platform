@@ -8,9 +8,11 @@
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import asyncpg
 from fastapi import HTTPException, status
+from asyncpg.exceptions import UniqueViolationError
 from jose import jwt
 from passlib.context import CryptContext
 
@@ -474,6 +476,121 @@ async def _fetch_activity_status(
     return str(row["status"])
 
 
+def _normalize_objectives(objectives: list[str]) -> list[str]:
+    """
+    @brief Validates and normalizes objective text values.
+    @param objectives Raw objective list from API payload.
+    @return A trimmed list of objectives.
+    @throws HTTPException 400 If list is empty or contains blank values.
+    """
+    normalized = [o.strip() for o in objectives if isinstance(o, str)]
+    if not normalized or any(not o for o in normalized):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one non-empty objective is required.",
+        )
+
+    return normalized
+
+
+def _build_activity_title(activity_text: str, optional_title: Optional[str]) -> str:
+    """
+    @brief Produces a non-empty title for activities table compatibility.
+    @param activity_text Main activity text.
+    @param optional_title Optional explicit title from API payload.
+    @return A non-empty title string with max 120 chars.
+    """
+    if optional_title and optional_title.strip():
+        return optional_title.strip()[:120]
+
+    compact_text = " ".join(activity_text.strip().split())
+    return compact_text[:120] if compact_text else "Untitled Activity"
+
+
+async def create_activity(
+    pool: asyncpg.Pool,
+    instructor_id: str,
+    course_id: str,
+    activity_no: int,
+    activity_text: str,
+    objectives: list[str],
+    title: Optional[str] = None,
+) -> dict:
+    """
+    @brief Creates a new activity for an authorized instructor (US-F).
+    @param pool The asyncpg connection pool instance.
+    @param instructor_id Authenticated instructor ID.
+    @param course_id Target course ID.
+    @param activity_no Activity number unique within the course.
+    @param activity_text Core activity text shown to students.
+    @param objectives Objective list stored for tutoring/scoring flows.
+    @param title Optional activity title.
+    @return A dictionary containing created activity metadata.
+    @throws HTTPException 400 For invalid required fields.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 409 For duplicate activity number in same course.
+    """
+    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
+
+    if activity_no < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="activity_no must be greater than or equal to 1.",
+        )
+
+    clean_text = activity_text.strip()
+    if not clean_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="activity_text is required.",
+        )
+
+    clean_objectives = _normalize_objectives(objectives)
+    final_title = _build_activity_title(clean_text, title)
+
+    query = """
+        INSERT INTO activities (
+            course_id,
+            activity_no,
+            title,
+            description,
+            objectives,
+            created_by,
+            status
+        )
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'DRAFT')
+        RETURNING id, course_id, activity_no, title, description, objectives, status
+    """
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query,
+                str(course_id),
+                int(activity_no),
+                final_title,
+                clean_text,
+                clean_objectives,
+                str(instructor_id),
+            )
+    except UniqueViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An activity with this activity_no already exists in the selected course.",
+        ) from exc
+
+    return {
+        "status": "success",
+        "activity_id": str(row["id"]),
+        "course_id": str(row["course_id"]),
+        "activity_no": int(row["activity_no"]),
+        "title": row["title"],
+        "activity_text": row["description"],
+        "objectives": row["objectives"],
+        "activity_status": row["status"],
+    }
+
+
 async def start_activity(
     pool: asyncpg.Pool,
     instructor_id: str,
@@ -602,6 +719,38 @@ async def startActivity(
         instructor_id=instructor_id,
         course_id=course_id,
         activity_no=activity_no,
+    )
+
+
+async def createActivity(
+    email: str,
+    password: str,
+    course_id: str,
+    activity_no: int,
+    activity_text: str,
+    objectives: list[str],
+    title: Optional[str] = None,
+) -> dict:
+    """
+    @brief Creates an activity with US-F contract-compatible signature.
+    @details Validates instructor credentials (fallback mode) and authorization.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    return await create_activity(
+        pool=pool,
+        instructor_id=instructor_id,
+        course_id=course_id,
+        activity_no=activity_no,
+        activity_text=activity_text,
+        objectives=objectives,
+        title=title,
     )
 
 
