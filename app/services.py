@@ -1297,130 +1297,46 @@ async def submitManualGrade(
 
 
 async def getStudentActivity(
-    email: str,
-    password: str,
-    course_id: str,
-    activity_no: int,
+    email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
     """
-    @brief Returns the activity content if it is ACTIVE and the student is authorized (US-I).
-    @details Excludes learning objectives from the response.
+    @brief Returns the activity content if ACTIVE (US-I).
     """
     pool = db_pool
-    if pool is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database pool is not initialized.",
-        )
-
-    # Note: password parameter is kept for signature compatibility with grading scripts if needed,
-    # but verify_student handles the actual authentication in main.py.
     student = await fetch_registered_student_by_email(pool, email)
-    student_id = str(student["id"])
-
-    await _ensure_student_enrolled_in_course(pool, student_id, course_id)
-
-    query = """
-        SELECT title, description, status
-        FROM   activities
-        WHERE  course_id::text = $1
-          AND  activity_no = $2
-        LIMIT 1
-    """
-    async with pool.acquire() as conn:
-        activity = await conn.fetchrow(query, str(course_id), int(activity_no))
-
-    if not activity:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Activity not found.",
-        )
-
-    activity_status = str(activity["status"])
-
-    if activity_status != "ACTIVE":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Activity is not currently active. Current status: {activity_status}.",
-        )
-
-    return {
-        "course_id": course_id,
-        "activity_no": activity_no,
-        "title": activity["title"],
-        "activity_text": activity["description"],
-        "status": activity_status,
-    }
-
-
+    await _ensure_student_enrolled_in_course(pool, str(student["id"]), course_id)
+    activity = await pool.fetchrow("SELECT title, description, status FROM activities WHERE course_id::text = $1 AND activity_no = $2", course_id, activity_no)
+    if not activity: raise HTTPException(status_code=404, detail="Not found.")
+    if activity["status"] != "ACTIVE": raise HTTPException(status_code=403, detail="Not active.")
+    return {"title": activity["title"], "activity_text": activity["description"], "status": activity["status"]}
 async def resetActivity(
-    email: str,
-    password: str,
-    course_id: str,
-    activity_no: int,
+    email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
     """
-    @brief Resets an activity by deleting all scores and changing its status to ENDED.
-    @details Implements US-M (Activity Reset). Requires instructor authorization.
+    @brief Resets an activity and deletes scores (US-M).
     """
     pool = db_pool
-
-    if password:
-        await instructorLogin(email, password)
-
+    if password: await instructorLogin(email, password)
     instructor = await fetch_registered_instructor_by_email(pool, email)
-    instructor_id = str(instructor["id"])
-
-    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
-
+    await _ensure_instructor_assigned_to_course(pool, str(instructor["id"]), course_id)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            activity = await conn.fetchrow(
-                """
-                SELECT id, status
-                FROM   activities
-                WHERE  course_id::text = $1
-                  AND  activity_no = $2
-                FOR UPDATE
-                """,
-                str(course_id),
-                int(activity_no),
-            )
-
-            if not activity:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Activity not found.",
-                )
-
-            activity_id = activity["id"]
-
-            # Delete all score records for this activity
-            await conn.execute(
-                "DELETE FROM objective_score_logs WHERE activity_id = $1",
-                activity_id
-            )
-            await conn.execute(
-                "DELETE FROM activity_scores WHERE activity_id = $1",
-                activity_id
-            )
-
-            # Set activity status to ENDED
-            await conn.execute(
-                """
-                UPDATE activities
-                SET    status = 'ENDED',
-                       updated_at = NOW()
-                WHERE  id = $1
-                """,
-                activity_id
-            )
-
-    return {
-        "status": "success",
-        "message": f"Activity {activity_no} has been reset: all scores deleted and status set to ENDED.",
-        "course_id": course_id,
-        "activity_no": activity_no,
-        "activity_status": "ENDED",
-    }
-
+            activity = await conn.fetchrow("SELECT id FROM activities WHERE course_id::text = $1 AND activity_no = $2 FOR UPDATE", course_id, activity_no)
+            if not activity: raise HTTPException(404, detail="Not found.")
+            await conn.execute("DELETE FROM objective_score_logs WHERE activity_id = $1", activity["id"])
+            await conn.execute("DELETE FROM activity_scores WHERE activity_id = $1", activity["id"])
+            await conn.execute("UPDATE activities SET status = 'ENDED' WHERE id = $1", activity["id"])
+    return {"status": "success", "message": "Activity reset."}
+async def listActivities(
+    email: str, password: str, course_id: str
+) -> dict:
+    """
+    @brief Lists activities in a selected course (US-E).
+    """
+    pool = db_pool
+    if password: await instructorLogin(email, password)
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    await _ensure_instructor_assigned_to_course(pool, str(instructor["id"]), course_id)
+    rows = await pool.fetch("SELECT id, activity_no, title, description, status FROM activities WHERE course_id::text = $1 ORDER BY activity_no ASC", course_id)
+    activities = [{"activity_id": str(r["id"]), "activity_no": r["activity_no"], "title": r["title"], "status": r["status"]} for r in rows]
+    return {"activities": activities}
