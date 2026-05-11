@@ -5,9 +5,10 @@
          managing instructor courses, and updating user credentials.
 """
 
+import json
 import logging
 import os
-import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -25,6 +26,15 @@ JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 
 logger = logging.getLogger("inclass.auth")
+
+_AUTO_SCORING_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for",
+    "from", "has", "have", "how", "in", "into", "is", "it", "its", "of",
+    "on", "or", "that", "the", "their", "then", "there", "these", "this",
+    "to", "was", "were", "what", "when", "where", "which", "why", "will",
+    "with", "your", "define", "describe", "explain", "identify",
+    "understand", "use", "using",
+}
 
 
 class PasswordHasher:
@@ -445,6 +455,116 @@ async def _ensure_instructor_assigned_to_course(
         )
 
 
+async def _ensure_student_enrolled_in_course(
+    pool: asyncpg.Pool,
+    student_id: str,
+    course_id: str,
+) -> None:
+    """Validate that a student belongs to the target course."""
+    query = """
+        SELECT 1
+        FROM   student_course_mapping
+        WHERE  student_id::text = $1
+          AND  course_id::text = $2
+        LIMIT 1
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(query, str(student_id), str(course_id))
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Student is not enrolled in this course.",
+        )
+
+
+def _coerce_objectives_payload(objectives: object) -> list[str]:
+    """Return activity objectives as a clean list of strings."""
+    raw_objectives = objectives
+    if isinstance(raw_objectives, str):
+        try:
+            raw_objectives = json.loads(raw_objectives)
+        except json.JSONDecodeError:
+            raw_objectives = [raw_objectives]
+
+    if not isinstance(raw_objectives, list):
+        return []
+
+    return [
+        objective.strip()
+        for objective in raw_objectives
+        if isinstance(objective, str) and objective.strip()
+    ]
+
+
+def _meaningful_words(text: str) -> set[str]:
+    """
+    Normalize text for deterministic objective matching.
+    The heuristic lowercases, removes punctuation, splits words, and ignores
+    very short/common words so objective-specific terms drive scoring.
+    """
+    normalized = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    return {
+        word
+        for word in normalized.split()
+        if len(word) > 2 and word not in _AUTO_SCORING_STOP_WORDS
+    }
+
+
+def _objective_is_achieved(objective_words: set[str], matched_words: list[str]) -> bool:
+    """Require a simple majority of meaningful objective words to appear."""
+    if not objective_words:
+        return False
+
+    if len(objective_words) <= 2:
+        required_matches = len(objective_words)
+    else:
+        required_matches = max(2, (len(objective_words) * 3 + 4) // 5)
+
+    return len(matched_words) >= required_matches
+
+
+def _find_new_objective_achievement(
+    objectives: list[str],
+    answer: str,
+    earned_indexes: set[int],
+) -> tuple[int, str, list[str]] | None:
+    """Find the first achieved objective that has not already earned a point."""
+    answer_words = _meaningful_words(answer)
+
+    for objective_index, objective_text in enumerate(objectives):
+        objective_words = _meaningful_words(objective_text)
+        matched_words = sorted(objective_words & answer_words)
+        if (
+            objective_index not in earned_indexes
+            and _objective_is_achieved(objective_words, matched_words)
+        ):
+            return objective_index, objective_text, matched_words
+
+    return None
+
+
+def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) -> str:
+    """Create a short academic note only after a new objective earns credit."""
+    if matched_words:
+        focus = ", ".join(matched_words[:3])
+        return (
+            f"Mini-lesson: {objective_text} depends on using key ideas like "
+            f"{focus} in a clear explanation, example, or cause-and-effect link."
+        )
+
+    return (
+        f"Mini-lesson: {objective_text} is strongest when the answer states the "
+        "main idea clearly and supports it with one precise academic detail."
+    )
+
+
+def _next_objective_question(objective_text: str) -> str:
+    """Ask for the next unearned objective without exposing the full objective list."""
+    clean_objective = " ".join(objective_text.split())
+    return f"What precise academic detail can you add about this objective: {clean_objective}?"
+
+
 async def _fetch_activity_status(
     pool: asyncpg.Pool,
     course_id: str,
@@ -779,6 +899,254 @@ async def endActivity(
         course_id=course_id,
         activity_no=activity_no,
     )
+
+
+async def submitAnswer(
+    email: str,
+    password: str,
+    course_id: str,
+    activity_no: int,
+    answer: str,
+) -> dict:
+    """
+    @brief Scores a student answer by awarding +1 for a newly achieved objective.
+    @details Signature is grading-script-compatible; password is accepted but the
+             endpoint authenticates the student before this service is called.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+
+    student = await fetch_registered_student_by_email(pool, email)
+    student_id = str(student["id"])
+    await _ensure_student_enrolled_in_course(pool, student_id, course_id)
+
+    clean_answer = (answer or "").strip()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            activity = await conn.fetchrow(
+                """
+                SELECT id, course_id, activity_no, objectives, status
+                FROM   activities
+                WHERE  course_id::text = $1
+                  AND  activity_no = $2
+                LIMIT 1
+                FOR UPDATE
+                """,
+                str(course_id),
+                int(activity_no),
+            )
+
+            if activity is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Activity not found.",
+                )
+
+            if str(activity["status"]) != "ACTIVE":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only ACTIVE activities accept student answers.",
+                )
+
+            objectives = _coerce_objectives_payload(activity["objectives"])
+            earned_rows = await conn.fetch(
+                """
+                SELECT objective_index
+                FROM   objective_score_logs
+                WHERE  student_id = $1
+                  AND  activity_id = $2
+                ORDER BY objective_index
+                """,
+                student["id"],
+                activity["id"],
+            )
+            earned_indexes = {int(row["objective_index"]) for row in earned_rows}
+            current_score = len(earned_indexes)
+
+            if not objectives or current_score >= len(objectives):
+                return {
+                    "score_delta": 0,
+                    "score": current_score,
+                    "message": (
+                        "Excellent work, all objectives are covered. "
+                        f"Your score is {current_score}."
+                    ),
+                    "completed": True,
+                    "next_question": None,
+                }
+
+            achievement = _find_new_objective_achievement(
+                objectives=objectives,
+                answer=clean_answer,
+                earned_indexes=earned_indexes,
+            )
+
+            if achievement is None:
+                next_unearned_index = next(
+                    (index for index in range(len(objectives)) if index not in earned_indexes),
+                    None,
+                )
+                next_question = (
+                    _next_objective_question(objectives[next_unearned_index])
+                    if next_unearned_index is not None
+                    else None
+                )
+                return {
+                    "score_delta": 0,
+                    "score": current_score,
+                    "message": (
+                        "No new objective was scored yet. Keep trying with a "
+                        "more specific academic detail."
+                    ),
+                    "completed": False,
+                    "next_question": next_question,
+                }
+
+            objective_index, objective_text, matched_words = achievement
+            total_score = current_score + 1
+            metadata = {
+                "answer": clean_answer,
+                "matched_words": matched_words,
+                "grading_type": "auto",
+            }
+            inserted = await conn.fetchrow(
+                """
+                INSERT INTO objective_score_logs (
+                    student_id,
+                    course_id,
+                    activity_id,
+                    objective_index,
+                    objective_text,
+                    score_delta,
+                    total_score,
+                    metadata
+                )
+                VALUES ($1, $2, $3, $4, $5, 1, $6, $7::jsonb)
+                ON CONFLICT (student_id, activity_id, objective_index)
+                DO NOTHING
+                RETURNING total_score
+                """,
+                student["id"],
+                activity["course_id"],
+                activity["id"],
+                int(objective_index),
+                objective_text,
+                int(total_score),
+                json.dumps(metadata),
+            )
+
+            if inserted is None:
+                latest_earned_rows = await conn.fetch(
+                    """
+                    SELECT objective_index
+                    FROM   objective_score_logs
+                    WHERE  student_id = $1
+                      AND  activity_id = $2
+                    ORDER BY objective_index
+                    """,
+                    student["id"],
+                    activity["id"],
+                )
+                latest_earned_indexes = {
+                    int(row["objective_index"]) for row in latest_earned_rows
+                }
+                latest_score = len(latest_earned_indexes)
+                next_unearned_index = next(
+                    (
+                        index
+                        for index in range(len(objectives))
+                        if index not in latest_earned_indexes
+                    ),
+                    None,
+                )
+                next_question = (
+                    _next_objective_question(objectives[next_unearned_index])
+                    if next_unearned_index is not None
+                    else None
+                )
+                completed = latest_score >= len(objectives)
+                return {
+                    "score_delta": 0,
+                    "score": latest_score,
+                    "message": (
+                        "Excellent work, all objectives are covered. Your score did not change."
+                        if completed
+                        else (
+                            "That objective was already counted, so your score did "
+                            "not change. Keep going with another specific idea."
+                        )
+                    ),
+                    "completed": completed,
+                    "next_question": None if completed else next_question,
+                }
+
+            total_score = int(inserted["total_score"])
+            await conn.execute(
+                """
+                INSERT INTO activity_scores (
+                    activity_id,
+                    student_id,
+                    score,
+                    grading_type,
+                    note
+                )
+                VALUES ($1, $2, $3, 'auto', 'Objective-based automatic score')
+                ON CONFLICT (activity_id, student_id)
+                DO UPDATE SET
+                    score = EXCLUDED.score,
+                    grading_type = 'auto',
+                    note = EXCLUDED.note,
+                    updated_at = NOW()
+                WHERE activity_scores.grading_type = 'auto'
+                """,
+                activity["id"],
+                student["id"],
+                total_score,
+            )
+
+            updated_earned_indexes = set(earned_indexes)
+            updated_earned_indexes.add(int(objective_index))
+            next_unearned_index = next(
+                (
+                    index
+                    for index in range(len(objectives))
+                    if index not in updated_earned_indexes
+                ),
+                None,
+            )
+            next_question = (
+                _next_objective_question(objectives[next_unearned_index])
+                if next_unearned_index is not None
+                else None
+            )
+            completed = total_score >= len(objectives)
+            response = {
+                "score_delta": 1,
+                "score": total_score,
+                "achieved_objective": objective_text,
+                "mini_lesson": _build_objective_mini_lesson(
+                    objective_text,
+                    matched_words,
+                ),
+                "message": (
+                    "Great work, you earned +1 point. "
+                    f"Your score is now {total_score}."
+                ),
+                "completed": completed,
+                "next_question": None if completed else next_question,
+            }
+
+            if completed:
+                response["message"] = (
+                    "Excellent work, you covered all objectives. "
+                    f"Your final objective score is {total_score}."
+                )
+
+            return response
 
 async def updateActivity(
     email: str, 

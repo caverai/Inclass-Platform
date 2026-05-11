@@ -51,6 +51,27 @@ SECURITY WARNING: In a real production application, this fallback should be
 removed or replaced with real password validation because it can allow "ghost
 login" behavior.
 
+## US-K Objective-Based Scoring
+
+`POST /student/answer` scores active activities against the activity objectives.
+Each objective can earn at most +1 point for a student. Repeating the same
+objective does not increase the score again.
+
+Successful score changes are logged in `objective_score_logs` with the student,
+course, activity, objective, score delta, total score, and metadata such as the
+submitted answer, matched words, and `grading_type: "auto"`. The `activity_scores`
+table stores the total automatic score summary when it can do so without
+overwriting manual grading.
+
+Mini-lessons are returned only when a new objective earns a point. When all
+objectives are achieved, the response celebrates completion and stops by
+returning no normal next question.
+
+Before testing `/student/answer`, manually run
+`db/migrations/2026-05-11_us_k_objective_scoring.sql` in the Supabase SQL Editor.
+Without that migration, `/student/answer` will fail because
+`objective_score_logs` will not exist.
+
 ## 4) Documentation Generation
 
 This project uses Doxygen for documentation. To generate the HTML documentation:

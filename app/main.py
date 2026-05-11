@@ -43,6 +43,7 @@ from app.services import (
     listMyCourses,
     setInstructorPassword,
     startActivity,
+    submitAnswer,
     update_user_password,
     updateActivity,
     submitManualGrade,
@@ -144,6 +145,15 @@ class ManualGradeRequest(BaseModel):
     student_email: str
     score: float
     note: str = ""
+
+
+class SubmitAnswerRequest(BaseModel):
+    """Request model for objective-based automatic scoring (US-K)."""
+    email: Optional[str] = None
+    password: Optional[str] = None
+    course_id: str
+    activity_no: int
+    answer: str
 
 
 
@@ -505,6 +515,28 @@ async def student_test(current_user: dict = Depends(verify_student)) -> dict:
         "email": current_user["email"],
         "role": current_user["role"],
     }
+
+
+@app.post(
+    "/student/answer",
+    summary="Submit an answer for objective-based automatic scoring",
+    tags=["Student"],
+)
+async def api_submit_answer(
+    body: SubmitAnswerRequest,
+    current_user: dict = Depends(verify_student),
+) -> dict:
+    """
+    @brief Scores a student answer against activity objectives.
+    @details Uses the authenticated student email, never the request body email.
+    """
+    return await submitAnswer(
+        email=current_user["email"],
+        password=body.password or "",
+        course_id=body.course_id,
+        activity_no=body.activity_no,
+        answer=body.answer,
+    )
 
 
 @app.get(
@@ -909,6 +941,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
-
-
-    
