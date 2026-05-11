@@ -1246,12 +1246,18 @@ async def submitManualGrade(
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
 
     # Verify activity exists
-    activity_query = "SELECT id, max_score FROM activities WHERE course_id::text = $1 AND activity_no = $2"
+    activity_query = "SELECT id, max_score, status FROM activities WHERE course_id::text = $1 AND activity_no = $2"
     async with pool.acquire() as conn:
         activity = await conn.fetchrow(activity_query, course_id, activity_no)
 
     if not activity:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found.")
+
+    if activity["status"] == "ENDED":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Cannot submit manual grades for an ended or reset activity."
+        )
 
     # Verify student exists
     student = await fetch_registered_student_by_email(pool, student_email)
@@ -1290,75 +1296,47 @@ async def submitManualGrade(
     }
 
 
+async def getStudentActivity(
+    email: str, password: str, course_id: str, activity_no: int
+) -> dict:
+    """
+    @brief Returns the activity content if ACTIVE (US-I).
+    """
+    pool = db_pool
+    student = await fetch_registered_student_by_email(pool, email)
+    await _ensure_student_enrolled_in_course(pool, str(student["id"]), course_id)
+    activity = await pool.fetchrow("SELECT title, description, status FROM activities WHERE course_id::text = $1 AND activity_no = $2", course_id, activity_no)
+    if not activity: raise HTTPException(status_code=404, detail="Not found.")
+    if activity["status"] != "ACTIVE": raise HTTPException(status_code=403, detail="Not active.")
+    return {"title": activity["title"], "activity_text": activity["description"], "status": activity["status"]}
+async def resetActivity(
+    email: str, password: str, course_id: str, activity_no: int
+) -> dict:
+    """
+    @brief Resets an activity and deletes scores (US-M).
+    """
+    pool = db_pool
+    if password: await instructorLogin(email, password)
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    await _ensure_instructor_assigned_to_course(pool, str(instructor["id"]), course_id)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            activity = await conn.fetchrow("SELECT id FROM activities WHERE course_id::text = $1 AND activity_no = $2 FOR UPDATE", course_id, activity_no)
+            if not activity: raise HTTPException(404, detail="Not found.")
+            await conn.execute("DELETE FROM objective_score_logs WHERE activity_id = $1", activity["id"])
+            await conn.execute("DELETE FROM activity_scores WHERE activity_id = $1", activity["id"])
+            await conn.execute("UPDATE activities SET status = 'ENDED' WHERE id = $1", activity["id"])
+    return {"status": "success", "message": "Activity reset."}
 async def listActivities(
-    email: str,
-    password: str,
-    course_id: str,
+    email: str, password: str, course_id: str
 ) -> dict:
     """
     @brief Lists activities in a selected course (US-E).
-    @details Returns course activity list with deterministic ordering by activity number.
-             Each item includes at least activity number and activity status.
-    @param email The school email address of the instructor.
-    @param password The plain-text password (for optional credential validation).
-    @param course_id The target course identifier.
-    @return A dictionary containing a list of activities with number, status, title, and other details.
-    @throws HTTPException 403 If instructor is not assigned to the target course.
-    @throws HTTPException 404 If course does not exist or has no activities.
     """
     pool = db_pool
-
-    if password:
-        await instructorLogin(email, password)
-
+    if password: await instructorLogin(email, password)
     instructor = await fetch_registered_instructor_by_email(pool, email)
-    instructor_id = str(instructor["id"])
-
-    # Verify instructor has access to this course
-    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
-
-    # Query activities ordered deterministically by activity_no ascending
-    query = """
-        SELECT 
-            id,
-            course_id,
-            activity_no,
-            title,
-            description,
-            objectives,
-            status,
-            created_at,
-            created_by
-        FROM activities
-        WHERE course_id::text = $1
-        ORDER BY activity_no ASC
-    """
-    
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(query, str(course_id))
-
-    if not rows:
-        logger.info("No activities found for course_id=%s", course_id)
-        return {"activities": []}
-
-    # Format activity records
-    activities = []
-    for row in rows:
-        activities.append({
-            "activity_id": str(row["id"]),
-            "activity_no": int(row["activity_no"]),
-            "title": row["title"],
-            "description": row["description"],
-            "objectives": _coerce_objectives_payload(row["objectives"]),
-            "status": row["status"],
-            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-        })
-
-    logger.info(
-        "Listed %d activities for course_id=%s instructor_id=%s",
-        len(activities),
-        course_id,
-        instructor_id,
-    )
-
+    await _ensure_instructor_assigned_to_course(pool, str(instructor["id"]), course_id)
+    rows = await pool.fetch("SELECT id, activity_no, title, description, status FROM activities WHERE course_id::text = $1 ORDER BY activity_no ASC", course_id)
+    activities = [{"activity_id": str(r["id"]), "activity_no": r["activity_no"], "title": r["title"], "status": r["status"]} for r in rows]
     return {"activities": activities}
