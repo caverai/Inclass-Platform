@@ -1246,12 +1246,18 @@ async def submitManualGrade(
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
 
     # Verify activity exists
-    activity_query = "SELECT id, max_score FROM activities WHERE course_id::text = $1 AND activity_no = $2"
+    activity_query = "SELECT id, max_score, status FROM activities WHERE course_id::text = $1 AND activity_no = $2"
     async with pool.acquire() as conn:
         activity = await conn.fetchrow(activity_query, course_id, activity_no)
 
     if not activity:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found.")
+
+    if activity["status"] == "ENDED":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Cannot submit manual grades for an ended or reset activity."
+        )
 
     # Verify student exists
     student = await fetch_registered_student_by_email(pool, student_email)
@@ -1345,3 +1351,76 @@ async def getStudentActivity(
         "activity_text": activity["description"],
         "status": activity_status,
     }
+
+
+async def resetActivity(
+    email: str,
+    password: str,
+    course_id: str,
+    activity_no: int,
+) -> dict:
+    """
+    @brief Resets an activity by deleting all scores and changing its status to ENDED.
+    @details Implements US-M (Activity Reset). Requires instructor authorization.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            activity = await conn.fetchrow(
+                """
+                SELECT id, status
+                FROM   activities
+                WHERE  course_id::text = $1
+                  AND  activity_no = $2
+                FOR UPDATE
+                """,
+                str(course_id),
+                int(activity_no),
+            )
+
+            if not activity:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Activity not found.",
+                )
+
+            activity_id = activity["id"]
+
+            # Delete all score records for this activity
+            await conn.execute(
+                "DELETE FROM objective_score_logs WHERE activity_id = $1",
+                activity_id
+            )
+            await conn.execute(
+                "DELETE FROM activity_scores WHERE activity_id = $1",
+                activity_id
+            )
+
+            # Set activity status to ENDED
+            await conn.execute(
+                """
+                UPDATE activities
+                SET    status = 'ENDED',
+                       updated_at = NOW()
+                WHERE  id = $1
+                """,
+                activity_id
+            )
+
+    return {
+        "status": "success",
+        "message": f"Activity {activity_no} has been reset: all scores deleted and status set to ENDED.",
+        "course_id": course_id,
+        "activity_no": activity_no,
+        "activity_status": "ENDED",
+    }
+

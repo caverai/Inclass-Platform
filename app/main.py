@@ -48,6 +48,7 @@ from app.services import (
     updateActivity,
     submitManualGrade,
     getStudentActivity,
+    resetActivity,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -784,6 +785,35 @@ async def api_end_activity(
     password = fallback_creds.get("password", "")
 
     return await endActivity(
+        email=current_user["email"],
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+    )
+
+
+@app.post(
+    "/instructor/activity/reset",
+    summary="Reset an activity",
+    tags=["Instructor"],
+)
+async def api_reset_activity(
+    request: Request,
+    course_id: str,
+    activity_no: int,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Resets an activity by deleting all student scores and setting status to ENDED.
+    @param course_id The target course identifier.
+    @param activity_no The activity number unique within the course.
+    @param current_user Authenticated instructor identity from verify_instructor.
+    @return A dictionary describing the reset operation.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await resetActivity(
         email=current_user["email"],
         password=password,
         course_id=course_id,
