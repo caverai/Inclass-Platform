@@ -47,6 +47,7 @@ from app.services import (
     update_user_password,
     updateActivity,
     submitManualGrade,
+    getStudentActivity,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -536,6 +537,31 @@ async def api_submit_answer(
         course_id=body.course_id,
         activity_no=body.activity_no,
         answer=body.answer,
+    )
+
+
+@app.get(
+    "/student/activity",
+    summary="Get active activity content",
+    tags=["Student"],
+)
+async def api_get_student_activity(
+    request: Request,
+    course_id: str,
+    activity_no: int,
+    current_user: dict = Depends(verify_student),
+) -> dict:
+    """
+    @brief Gets the content of an ACTIVE activity.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await getStudentActivity(
+        email=current_user["email"],
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
     )
 
 

@@ -1288,3 +1288,60 @@ async def submitManualGrade(
         "status": "success",
         "message": f"Manual grade of {score} successfully logged for {student_email}."
     }
+
+
+async def getStudentActivity(
+    email: str,
+    password: str,
+    course_id: str,
+    activity_no: int,
+) -> dict:
+    """
+    @brief Returns the activity content if it is ACTIVE and the student is authorized (US-I).
+    @details Excludes learning objectives from the response.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+
+    # Note: password parameter is kept for signature compatibility with grading scripts if needed,
+    # but verify_student handles the actual authentication in main.py.
+    student = await fetch_registered_student_by_email(pool, email)
+    student_id = str(student["id"])
+
+    await _ensure_student_enrolled_in_course(pool, student_id, course_id)
+
+    query = """
+        SELECT title, description, status
+        FROM   activities
+        WHERE  course_id::text = $1
+          AND  activity_no = $2
+        LIMIT 1
+    """
+    async with pool.acquire() as conn:
+        activity = await conn.fetchrow(query, str(course_id), int(activity_no))
+
+    if not activity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found.",
+        )
+
+    activity_status = str(activity["status"])
+
+    if activity_status != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Activity is not currently active. Current status: {activity_status}.",
+        )
+
+    return {
+        "course_id": course_id,
+        "activity_no": activity_no,
+        "title": activity["title"],
+        "activity_text": activity["description"],
+        "status": activity_status,
+    }
