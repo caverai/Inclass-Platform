@@ -1288,3 +1288,77 @@ async def submitManualGrade(
         "status": "success",
         "message": f"Manual grade of {score} successfully logged for {student_email}."
     }
+
+
+async def listActivities(
+    email: str,
+    password: str,
+    course_id: str,
+) -> dict:
+    """
+    @brief Lists activities in a selected course (US-E).
+    @details Returns course activity list with deterministic ordering by activity number.
+             Each item includes at least activity number and activity status.
+    @param email The school email address of the instructor.
+    @param password The plain-text password (for optional credential validation).
+    @param course_id The target course identifier.
+    @return A dictionary containing a list of activities with number, status, title, and other details.
+    @throws HTTPException 403 If instructor is not assigned to the target course.
+    @throws HTTPException 404 If course does not exist or has no activities.
+    """
+    pool = db_pool
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    instructor_id = str(instructor["id"])
+
+    # Verify instructor has access to this course
+    await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
+
+    # Query activities ordered deterministically by activity_no ascending
+    query = """
+        SELECT 
+            id,
+            course_id,
+            activity_no,
+            title,
+            description,
+            objectives,
+            status,
+            created_at,
+            created_by
+        FROM activities
+        WHERE course_id::text = $1
+        ORDER BY activity_no ASC
+    """
+    
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, str(course_id))
+
+    if not rows:
+        logger.info("No activities found for course_id=%s", course_id)
+        return {"activities": []}
+
+    # Format activity records
+    activities = []
+    for row in rows:
+        activities.append({
+            "activity_id": str(row["id"]),
+            "activity_no": int(row["activity_no"]),
+            "title": row["title"],
+            "description": row["description"],
+            "objectives": _coerce_objectives_payload(row["objectives"]),
+            "status": row["status"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        })
+
+    logger.info(
+        "Listed %d activities for course_id=%s instructor_id=%s",
+        len(activities),
+        course_id,
+        instructor_id,
+    )
+
+    return {"activities": activities}

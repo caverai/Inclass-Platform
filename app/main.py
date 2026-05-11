@@ -40,6 +40,7 @@ from app.services import (
     fetch_user_by_email,
     fetch_user_by_id,
     instructorLogin,
+    listActivities,
     listMyCourses,
     setInstructorPassword,
     startActivity,
@@ -664,6 +665,37 @@ async def api_change_instructor_password(
         password=password,
         old_password=body.old_password,
         new_password=body.new_password,
+    )
+
+
+@app.get(
+    "/instructor/activities",
+    summary="List activities in a selected course",
+    tags=["Instructor"],
+)
+async def api_list_activities(
+    request: Request,
+    course_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Lists all activities in a selected course for an authorized instructor.
+    @details Returns course activity list ordered deterministically by activity number.
+             Each item includes activity number, status, title, and objectives.
+    @param request The FastAPI Request object.
+    @param course_id The target course identifier.
+    @param current_user Authenticated instructor identity from verify_instructor.
+    @return A dictionary containing the list of activities in the course.
+    @throws HTTPException 403 If instructor-course authorization fails.
+    @throws HTTPException 404 If course has no activities.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await listActivities(
+        email=current_user["email"],
+        password=password,
+        course_id=course_id,
     )
 
 
