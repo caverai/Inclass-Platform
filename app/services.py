@@ -560,9 +560,12 @@ def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) 
 
 
 def _next_objective_question(objective_text: str) -> str:
-    """Ask for the next unearned objective without exposing the full objective list."""
-    clean_objective = " ".join(objective_text.split())
-    return f"What precise academic detail can you add about this objective: {clean_objective}?"
+    """Ask a single guidance question that steers toward the next objective."""
+    _ = objective_text  # Objective is selected internally; prompt should not reveal answers directly.
+    return (
+        "What is one precise academic detail you can add next to strengthen your answer "
+        "for this activity objective?"
+    )
 
 
 async def _fetch_activity_status(
@@ -946,10 +949,14 @@ async def submitAnswer(
                     detail="Activity not found.",
                 )
 
-            if str(activity["status"]) != "ACTIVE":
+            activity_status = str(activity["status"])
+            if activity_status != "ACTIVE":
+                detail = "Only ACTIVE activities accept student answers."
+                if activity_status == "ENDED":
+                    detail = "This activity is ENDED, so the tutoring flow cannot continue."
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Only ACTIVE activities accept student answers.",
+                    detail=detail,
                 )
 
             objectives = _coerce_objectives_payload(activity["objectives"])
@@ -1300,15 +1307,72 @@ async def getStudentActivity(
     email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
     """
-    @brief Returns the activity content if ACTIVE (US-I).
+    @brief Returns the activity content and first guidance question for students.
     """
     pool = db_pool
     student = await fetch_registered_student_by_email(pool, email)
     await _ensure_student_enrolled_in_course(pool, str(student["id"]), course_id)
-    activity = await pool.fetchrow("SELECT title, description, status FROM activities WHERE course_id::text = $1 AND activity_no = $2", course_id, activity_no)
-    if not activity: raise HTTPException(status_code=404, detail="Not found.")
-    if activity["status"] != "ACTIVE": raise HTTPException(status_code=403, detail="Not active.")
-    return {"title": activity["title"], "activity_text": activity["description"], "status": activity["status"]}
+    activity = await pool.fetchrow(
+        """
+        SELECT id, title, description, objectives, status
+        FROM activities
+        WHERE course_id::text = $1
+          AND activity_no = $2
+        LIMIT 1
+        """,
+        course_id,
+        activity_no,
+    )
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found.")
+
+    activity_status = str(activity["status"])
+    if activity_status != "ACTIVE":
+        detail = "Only ACTIVE activities can be opened."
+        if activity_status == "ENDED":
+            detail = "This activity is ENDED, so the tutoring flow cannot continue."
+        raise HTTPException(status_code=403, detail=detail)
+
+    objectives = _coerce_objectives_payload(activity["objectives"])
+    earned_rows = await pool.fetch(
+        """
+        SELECT objective_index
+        FROM objective_score_logs
+        WHERE student_id = $1
+          AND activity_id = $2
+        ORDER BY objective_index
+        """,
+        student["id"],
+        activity["id"],
+    )
+    earned_indexes = {int(row["objective_index"]) for row in earned_rows}
+    current_score = len(earned_indexes)
+
+    next_unearned_index = next(
+        (index for index in range(len(objectives)) if index not in earned_indexes),
+        None,
+    )
+    completed = bool(objectives) and current_score >= len(objectives)
+    next_question = (
+        _next_objective_question(objectives[next_unearned_index])
+        if next_unearned_index is not None
+        else None
+    )
+
+    # US-J: the first tutoring response includes activity text and exactly one question.
+    if not objectives:
+        next_question = (
+            "What is one clear, objective-focused explanation you can provide for this activity?"
+        )
+
+    return {
+        "title": activity["title"],
+        "activity_text": activity["description"],
+        "status": activity_status,
+        "score": current_score,
+        "completed": completed,
+        "next_question": next_question if not completed else None,
+    }
 async def resetActivity(
     email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
