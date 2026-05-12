@@ -38,9 +38,14 @@ uvicorn app.main:app --reload
 
 ## Frontend UI (Demo)
 
-The repository now includes a lightweight frontend at `frontend/` served by FastAPI.
+The repository includes a lightweight frontend at `frontend/` served by FastAPI.
 
-- Open `http://127.0.0.1:8000/` (redirects to `/frontend/`)
+- Run the app with `uvicorn app.main:app --reload` (default port is 8000). Open the URL matching the host and port you used. Examples:
+	- Default: `http://127.0.0.1:8000/` (redirects to `/frontend/`)
+	- If you start on port 8010: `http://127.0.0.1:8010/`
+
+- Note: an earlier startup failure was due to DNS/DB host resolution (the server could not resolve the `DATABASE_URL` host). That is a database connection/DNS issue, not a frontend problem. Enabling IPv6 can change name-resolution behavior on some networks; if you see the previous error, ensure your machine can resolve and reach the database host in `DATABASE_URL`.
+
 - Instructor mode uses `POST /instructor/login` and Bearer token calls.
 - Student mode uses the existing grading-script compatibility flow for student endpoints.
 
