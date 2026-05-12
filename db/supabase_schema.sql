@@ -53,6 +53,21 @@ CREATE TABLE IF NOT EXISTS activities (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS student_activity_progress (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    activity_id UUID NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    current_score INTEGER NOT NULL DEFAULT 0,
+    completed BOOLEAN NOT NULL DEFAULT FALSE,
+    last_question TEXT,
+    last_answer TEXT,
+    last_interaction_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (student_id, activity_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (school_email);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users (role);
 CREATE INDEX IF NOT EXISTS idx_mapping_instructor ON instructor_course_mapping (instructor_id);
@@ -62,6 +77,10 @@ CREATE INDEX IF NOT EXISTS idx_mapping_student_course ON student_course_mapping 
 CREATE INDEX IF NOT EXISTS idx_activities_course ON activities (course_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_course_no ON activities (course_id, activity_no);
 CREATE INDEX IF NOT EXISTS idx_activities_objectives_gin ON activities USING GIN (objectives);
+CREATE INDEX IF NOT EXISTS idx_student_activity_progress_student
+    ON student_activity_progress (student_id);
+CREATE INDEX IF NOT EXISTS idx_student_activity_progress_activity
+    ON student_activity_progress (activity_id);
 
 -- Optional seed for quick smoke test; replace domain/email before use.
 -- INSERT INTO users (school_email, full_name, role)

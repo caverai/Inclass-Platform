@@ -975,6 +975,16 @@ async def submitAnswer(
             current_score = len(earned_indexes)
 
             if not objectives or current_score >= len(objectives):
+                await _upsert_student_activity_progress(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    current_score=current_score,
+                    completed=True,
+                    last_question=None,
+                    last_answer=clean_answer,
+                )
                 return {
                     "score_delta": 0,
                     "score": current_score,
@@ -1001,6 +1011,16 @@ async def submitAnswer(
                     _next_objective_question(objectives[next_unearned_index])
                     if next_unearned_index is not None
                     else None
+                )
+                await _upsert_student_activity_progress(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    current_score=current_score,
+                    completed=False,
+                    last_question=next_question,
+                    last_answer=clean_answer,
                 )
                 return {
                     "score_delta": 0,
@@ -1076,6 +1096,16 @@ async def submitAnswer(
                     else None
                 )
                 completed = latest_score >= len(objectives)
+                await _upsert_student_activity_progress(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    current_score=latest_score,
+                    completed=completed,
+                    last_question=None if completed else next_question,
+                    last_answer=clean_answer,
+                )
                 return {
                     "score_delta": 0,
                     "score": latest_score,
@@ -1152,6 +1182,17 @@ async def submitAnswer(
                     "Excellent work, you covered all objectives. "
                     f"Your final objective score is {total_score}."
                 )
+
+            await _upsert_student_activity_progress(
+                conn=conn,
+                student_id=str(student["id"]),
+                course_id=str(activity["course_id"]),
+                activity_id=str(activity["id"]),
+                current_score=total_score,
+                completed=completed,
+                last_question=None if completed else next_question,
+                last_answer=clean_answer,
+            )
 
             return response
 
@@ -1303,6 +1344,51 @@ async def submitManualGrade(
     }
 
 
+async def _upsert_student_activity_progress(
+    conn: asyncpg.Connection,
+    student_id: str,
+    course_id: str,
+    activity_id: str,
+    current_score: int,
+    completed: bool,
+    last_question: str | None,
+    last_answer: str | None,
+) -> None:
+    """Persist the current tutoring state for a student on a specific activity."""
+    await conn.execute(
+        """
+        INSERT INTO student_activity_progress (
+            student_id,
+            course_id,
+            activity_id,
+            current_score,
+            completed,
+            last_question,
+            last_answer,
+            last_interaction_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        ON CONFLICT (student_id, activity_id)
+        DO UPDATE SET
+            course_id = EXCLUDED.course_id,
+            current_score = EXCLUDED.current_score,
+            completed = EXCLUDED.completed,
+            last_question = EXCLUDED.last_question,
+            last_answer = EXCLUDED.last_answer,
+            last_interaction_at = NOW(),
+            updated_at = NOW()
+        """,
+        student_id,
+        course_id,
+        activity_id,
+        int(current_score),
+        bool(completed),
+        last_question,
+        last_answer,
+    )
+
+
 async def getStudentActivity(
     email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
@@ -1365,6 +1451,18 @@ async def getStudentActivity(
             "What is one clear, objective-focused explanation you can provide for this activity?"
         )
 
+    async with pool.acquire() as conn:
+        await _upsert_student_activity_progress(
+            conn=conn,
+            student_id=str(student["id"]),
+            course_id=str(course_id),
+            activity_id=str(activity["id"]),
+            current_score=current_score,
+            completed=completed,
+            last_question=next_question,
+            last_answer=None,
+        )
+
     return {
         "title": activity["title"],
         "activity_text": activity["description"],
@@ -1389,6 +1487,7 @@ async def resetActivity(
             if not activity: raise HTTPException(404, detail="Not found.")
             await conn.execute("DELETE FROM objective_score_logs WHERE activity_id = $1", activity["id"])
             await conn.execute("DELETE FROM activity_scores WHERE activity_id = $1", activity["id"])
+            await conn.execute("DELETE FROM student_activity_progress WHERE activity_id = $1", activity["id"])
             await conn.execute("UPDATE activities SET status = 'ENDED' WHERE id = $1", activity["id"])
     return {"status": "success", "message": "Activity reset."}
 async def listActivities(
