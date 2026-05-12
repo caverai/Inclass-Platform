@@ -18,7 +18,8 @@ load_dotenv()
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -55,6 +56,8 @@ from app.services import (
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
 SCHOOL_EMAIL_DOMAIN: str = os.environ["SCHOOL_EMAIL_DOMAIN"]
 DATABASE_URL: str = os.environ["DATABASE_URL"]
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("inclass.auth")
@@ -64,6 +67,14 @@ app = FastAPI(
     description="Google Federated Sign-In with role-based access",
     version="1.0.0",
 )
+
+app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+
+@app.get("/", include_in_schema=False)
+async def frontend_root() -> RedirectResponse:
+    """Redirects root requests to the browser frontend."""
+    return RedirectResponse(url="/frontend/")
 
 
 @app.on_event("startup")

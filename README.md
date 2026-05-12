@@ -36,6 +36,20 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
+## Frontend UI (Demo)
+
+The repository now includes a lightweight frontend at `frontend/` served by FastAPI.
+
+- Open `http://127.0.0.1:8000/` (redirects to `/frontend/`)
+- Instructor mode uses `POST /instructor/login` and Bearer token calls.
+- Student mode uses the existing grading-script compatibility flow for student endpoints.
+
+Main frontend files:
+
+- `frontend/index.html`
+- `frontend/styles.css`
+- `frontend/app.js`
+
 ## Hybrid Auth / Grading Script Fallback
 
 Normal app authentication uses Google OAuth and JWT Bearer tokens.
