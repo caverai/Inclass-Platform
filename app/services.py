@@ -1260,6 +1260,274 @@ async def submitAnswer(
 
             return response
 
+
+def _json_safe(value: object) -> object:
+    """Convert common database values into JSON-friendly shapes."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
+
+
+def _coerce_json_object(value: object) -> dict:
+    """Return JSON metadata as a dict whether asyncpg gives dict or text."""
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    return {}
+
+
+def _timestamp_or_none(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    return None
+
+
+def _latest_timestamp(*values: object) -> datetime | None:
+    timestamps = [value for value in (_timestamp_or_none(item) for item in values) if value]
+    return max(timestamps) if timestamps else None
+
+
+async def getActivityLogs(
+    email: str,
+    password: str,
+    activity_id: str,
+) -> list[dict]:
+    """
+    @brief Returns per-student objective scoring logs for an instructor activity.
+    @details objective_score_logs is the source of truth. activity_scores is merged
+             only as a summary/manual score fallback and never as global completion.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+    activity = await pool.fetchrow(
+        """
+        SELECT id, course_id, objectives
+        FROM   activities
+        WHERE  id::text = $1
+        LIMIT 1
+        """,
+        str(activity_id),
+    )
+
+    if activity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found.",
+        )
+
+    await _ensure_instructor_assigned_to_course(
+        pool,
+        str(instructor["id"]),
+        str(activity["course_id"]),
+    )
+
+    objectives = _coerce_objectives_payload(activity["objectives"])
+    total_objectives = len(objectives)
+
+    objective_rows = await pool.fetch(
+        """
+        SELECT
+            osl.id::text AS id,
+            osl.student_id::text AS student_id,
+            u.full_name AS student_name,
+            u.school_email AS student_email,
+            osl.activity_id::text AS activity_id,
+            osl.objective_index,
+            osl.objective_text,
+            osl.score_delta,
+            osl.total_score,
+            osl.metadata,
+            osl.created_at
+        FROM objective_score_logs osl
+        JOIN users u ON u.id = osl.student_id
+        WHERE osl.activity_id = $1
+        ORDER BY osl.created_at DESC
+        """,
+        activity["id"],
+    )
+
+    score_rows = await pool.fetch(
+        """
+        SELECT
+            scores.id::text AS id,
+            scores.student_id::text AS student_id,
+            u.full_name AS student_name,
+            u.school_email AS student_email,
+            scores.activity_id::text AS activity_id,
+            scores.score,
+            scores.grading_type,
+            scores.note,
+            scores.created_at,
+            scores.updated_at
+        FROM activity_scores scores
+        JOIN users u ON u.id = scores.student_id
+        WHERE scores.activity_id = $1
+        """,
+        activity["id"],
+    )
+
+    logs_by_student: dict[str, dict] = {}
+
+    def ensure_student_entry(
+        student_id: str,
+        student_name: str | None,
+        student_email: str,
+    ) -> dict:
+        entry = logs_by_student.get(student_id)
+        if entry is None:
+            entry = {
+                "student_id": student_id,
+                "student_name": student_name or student_email,
+                "student_email": student_email,
+                "objective_entries": [],
+                "summary_score": None,
+                "summary_grading_type": None,
+                "summary_id": None,
+                "summary_note": None,
+                "summary_timestamp": None,
+            }
+            logs_by_student[student_id] = entry
+        elif student_name and entry["student_name"] == entry["student_email"]:
+            entry["student_name"] = student_name
+
+        return entry
+
+    for row in objective_rows:
+        student_id = str(row["student_id"])
+        entry = ensure_student_entry(
+            student_id=student_id,
+            student_name=row["student_name"],
+            student_email=row["student_email"],
+        )
+        metadata = _coerce_json_object(row["metadata"])
+        matched_words = metadata.get("matched_words", [])
+        if not isinstance(matched_words, list):
+            matched_words = []
+
+        entry["objective_entries"].append(
+            {
+                "logId": row["id"],
+                "objectiveIndex": int(row["objective_index"]),
+                "objectiveText": row["objective_text"],
+                "scoreDelta": int(row["score_delta"]),
+                "totalScoreAtLog": int(row["total_score"]),
+                "matchedWords": matched_words,
+                "achievedAt": _json_safe(row["created_at"]),
+            }
+        )
+
+    for row in score_rows:
+        student_id = str(row["student_id"])
+        entry = ensure_student_entry(
+            student_id=student_id,
+            student_name=row["student_name"],
+            student_email=row["student_email"],
+        )
+        entry["summary_score"] = float(row["score"]) if row["score"] is not None else None
+        entry["summary_grading_type"] = row["grading_type"]
+        entry["summary_id"] = row["id"]
+        entry["summary_note"] = row["note"]
+        entry["summary_timestamp"] = _latest_timestamp(row["updated_at"], row["created_at"])
+
+    logs: list[dict] = []
+    for entry in logs_by_student.values():
+        objective_entries = sorted(
+            entry["objective_entries"],
+            key=lambda item: item["objectiveIndex"],
+        )
+        earned_indexes = {
+            int(item["objectiveIndex"])
+            for item in objective_entries
+        }
+        objective_score = len(earned_indexes)
+        completed = total_objectives > 0 and objective_score >= total_objectives
+        latest_objective_at = _latest_timestamp(
+            *[item["achievedAt"] for item in objective_entries]
+        )
+        timestamp = _latest_timestamp(latest_objective_at, entry["summary_timestamp"])
+        if timestamp is None:
+            timestamp = datetime.now(tz=timezone.utc)
+        latest_objective_entry = max(
+            objective_entries,
+            key=lambda item: _timestamp_or_none(item["achievedAt"]) or datetime.min.replace(tzinfo=timezone.utc),
+            default=None,
+        )
+
+        objective_metadata = {
+            f"Objective {item['objectiveIndex'] + 1}": {
+                "objectiveIndex": item["objectiveIndex"],
+                "objectiveText": item["objectiveText"],
+                "scoreDelta": item["scoreDelta"],
+                "matchedWords": item["matchedWords"],
+                "achievedAt": item["achievedAt"],
+            }
+            for item in objective_entries
+        }
+
+        if entry["summary_score"] is not None:
+            objective_metadata["Summary score"] = {
+                "score": entry["summary_score"],
+                "gradingType": entry["summary_grading_type"],
+                "note": entry["summary_note"],
+            }
+
+        event_type = "COMPLETED" if completed else "PARTIAL_PROGRESS"
+        if not objective_entries and entry["summary_grading_type"] == "manual":
+            event_type = "MANUAL_GRADE"
+
+        log_id = (
+            latest_objective_entry["logId"]
+            if latest_objective_entry
+            else entry["summary_id"] or f"{activity_id}:{entry['student_id']}"
+        )
+
+        logs.append(
+            {
+                "id": log_id,
+                "logId": log_id,
+                "groupId": f"{activity_id}:{entry['student_id']}",
+                "activityId": str(activity["id"]),
+                "studentId": entry["student_id"],
+                "studentName": entry["student_name"],
+                "studentEmail": entry["student_email"],
+                "score": objective_score if objective_entries else entry["summary_score"],
+                "objectiveMetadata": objective_metadata,
+                "objectivesCompleted": objective_score,
+                "totalObjectives": total_objectives,
+                "completed": completed,
+                "eventType": event_type,
+                "timestamp": timestamp.isoformat(),
+            }
+        )
+
+    return sorted(logs, key=lambda item: item["timestamp"], reverse=True)
+
+
 async def updateActivity(
     email: str, 
     password: str, 

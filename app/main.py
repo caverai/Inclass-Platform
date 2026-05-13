@@ -55,6 +55,7 @@ from app.services import (
     updateActivity,
     submitManualGrade,
     getStudentActivity,
+    getActivityLogs,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -946,6 +947,31 @@ async def api_reset_activity(
         password=password,
         course_id=course_id,
         activity_no=activity_no,
+    )
+
+
+@app.get(
+    "/instructor/activities/{activity_id}/logs",
+    summary="Get activity scoring logs",
+    tags=["Instructor"],
+)
+async def api_get_activity_logs(
+    request: Request,
+    activity_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> list[dict]:
+    """
+    @brief Returns student-specific scoring and completion logs for an activity.
+    @details Requires instructor authorization and restricts access to activities
+             in courses assigned to the authenticated instructor.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await getActivityLogs(
+        email=current_user["email"],
+        password=password,
+        activity_id=activity_id,
     )
 
 

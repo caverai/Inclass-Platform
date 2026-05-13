@@ -1,4 +1,5 @@
 
+import { apiClient } from './client';
 import type { Course, Activity, ActivityLog } from '../types';
 
 // Mock data
@@ -26,26 +27,31 @@ const mockCourses: Course[] = [
   { id: 'course-2', title: 'Advanced Software Engineering', description: 'Design patterns and scalable architectures.' },
 ];
 
-const mockLogs: ActivityLog[] = [
-  {
-    id: 'log-1',
-    activityId: 'act-2',
-    studentName: 'Alice Johnson',
-    score: 85,
-    objectiveMetadata: { 'System design principles': 'Good', 'Real-time communication protocols': 'Needs Improvement' },
-    timestamp: new Date().toISOString(),
-    eventType: 'SUBMISSION',
-  },
-  {
-    id: 'log-2',
-    activityId: 'act-2',
-    studentName: 'Bob Williams',
-    score: 92,
-    objectiveMetadata: { 'System design principles': 'Excellent', 'Real-time communication protocols': 'Good' },
-    timestamp: new Date(Date.now() - 3600000).toISOString(),
-    eventType: 'SUBMISSION',
-  },
-];
+const normalizeActivityLog = (raw: Record<string, unknown>): ActivityLog => {
+  const studentId = raw.studentId ?? raw.student_id;
+  const studentEmail = raw.studentEmail ?? raw.student_email;
+  const objectivesCompleted = raw.objectivesCompleted ?? raw.objectives_completed;
+  const totalObjectives = raw.totalObjectives ?? raw.total_objectives;
+
+  return {
+    id: String(raw.id),
+    activityId: String(raw.activityId ?? raw.activity_id),
+    studentId: studentId === undefined || studentId === null ? undefined : String(studentId),
+    studentName: String(raw.studentName ?? raw.student_name ?? studentEmail ?? 'Unknown Student'),
+    studentEmail: studentEmail === undefined || studentEmail === null ? undefined : String(studentEmail),
+    score: raw.score === null || raw.score === undefined ? null : Number(raw.score),
+    objectiveMetadata: raw.objectiveMetadata ?? raw.objective_metadata ?? {},
+    objectivesCompleted: objectivesCompleted === undefined || objectivesCompleted === null
+      ? undefined
+      : Number(objectivesCompleted),
+    totalObjectives: totalObjectives === undefined || totalObjectives === null
+      ? undefined
+      : Number(totalObjectives),
+    completed: Boolean(raw.completed),
+    timestamp: String(raw.timestamp),
+    eventType: String(raw.eventType ?? raw.event_type ?? 'PARTIAL_PROGRESS'),
+  };
+};
 
 export const instructorApi = {
   getCourses: async () => {
@@ -107,9 +113,8 @@ export const instructorApi = {
   },
 
   getActivityLogs: async (activityId: string) => {
-    // return apiClient.get<ActivityLog[]>(`/instructor/activities/${activityId}/logs`).then(res => res.data);
-    return new Promise<ActivityLog[]>((resolve) => 
-      setTimeout(() => resolve(mockLogs.filter(l => l.activityId === activityId)), 300)
-    );
+    const response = await apiClient.get(`/instructor/activities/${activityId}/logs`);
+    const rawLogs = Array.isArray(response.data) ? response.data : response.data?.logs ?? [];
+    return rawLogs.map((raw: Record<string, unknown>) => normalizeActivityLog(raw));
   },
 };

@@ -27,9 +27,14 @@ export interface Activity {
 export interface ActivityLog {
   id: string;
   activityId: string;
+  studentId?: string;
   studentName: string;
+  studentEmail?: string;
   score: number | null;
-  objectiveMetadata: any;
+  objectiveMetadata: unknown;
+  objectivesCompleted?: number;
+  totalObjectives?: number;
+  completed?: boolean;
   timestamp: string;
   eventType: string;
 }
