@@ -8,3 +8,6 @@ pydantic
 requests
 passlib[bcrypt]
 doxypypy
+pytest 
+pytest-asyncio 
+httpx
