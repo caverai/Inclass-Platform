@@ -59,7 +59,7 @@ def fake_student() -> dict:
 @pytest.fixture()
 def override_instructor_dep(fake_instructor):
     """Override verify_instructor dependency to return fake_instructor."""
-    async def _fake_verify_instructor(*args, **kwargs):
+    async def _fake_verify_instructor():
         return fake_instructor
 
     app.dependency_overrides[verify_instructor] = _fake_verify_instructor
@@ -70,7 +70,7 @@ def override_instructor_dep(fake_instructor):
 @pytest.fixture()
 def override_student_dep(fake_student):
     """Override verify_student dependency to return fake_student."""
-    async def _fake_verify_student(*args, **kwargs):
+    async def _fake_verify_student():
         return fake_student
 
     app.dependency_overrides[verify_student] = _fake_verify_student

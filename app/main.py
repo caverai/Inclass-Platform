@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 from urllib.parse import parse_qs
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
@@ -62,10 +63,26 @@ FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("inclass.auth")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup işlemleri ---
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    app.state.db_pool = pool
+    services.db_pool = pool
+    logger.info("Database connection pool created.")
+
+    yield  # Uygulamanın çalıştığı süre boyunca burada bekler
+
+    # --- Shutdown işlemleri ---
+    await app.state.db_pool.close()
+    logger.info("Database connection pool closed.")
+
+
 app = FastAPI(
     title="InClass Auth Service",
     description="Google Federated Sign-In with role-based access",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
@@ -75,21 +92,6 @@ app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR, html=True), name="fro
 async def frontend_root() -> RedirectResponse:
     """Redirects root requests to the browser frontend."""
     return RedirectResponse(url="/frontend/")
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
-    app.state.db_pool = pool
-    services.db_pool = pool
-    logger.info("Database connection pool created.")
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    await app.state.db_pool.close()
-    logger.info("Database connection pool closed.")
-
 
 class GoogleTokenRequest(BaseModel):
     """
