@@ -4,6 +4,18 @@ import { LogOut, BookOpen } from 'lucide-react';
 import { authApi } from '../api/authApi';
 import type { User } from '../types';
 
+const getRequiredRole = (path: string): User['role'] | null => {
+  if (path.startsWith('/instructor')) return 'INSTRUCTOR';
+  if (path.startsWith('/student')) return 'STUDENT';
+  return null;
+};
+
+const getHomePath = (role: User['role']) => {
+  if (role === 'INSTRUCTOR') return '/instructor/dashboard';
+  if (role === 'STUDENT') return '/student/dashboard';
+  return '/login';
+};
+
 export const Layout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -13,13 +25,17 @@ export const Layout: React.FC = () => {
     const fetchUser = async () => {
       try {
         const currentUser = await authApi.getMe();
-        if (currentUser.role !== 'INSTRUCTOR' && location.pathname.startsWith('/instructor')) {
-          navigate('/login');
-        } else {
+        const requiredRole = getRequiredRole(location.pathname);
+
+        if (requiredRole && currentUser.role !== requiredRole) {
           setUser(currentUser);
+          navigate(getHomePath(currentUser.role), { replace: true });
+          return;
         }
-      } catch (err) {
-        navigate('/login');
+
+        setUser(currentUser);
+      } catch {
+        navigate('/login', { replace: true });
       }
     };
     
@@ -31,11 +47,17 @@ export const Layout: React.FC = () => {
   const handleLogout = () => {
     localStorage.removeItem('demo_token');
     localStorage.removeItem('demo_role');
+    localStorage.removeItem('demo_user');
     navigate('/login');
   };
 
   if (location.pathname === '/login') {
     return <Outlet />;
+  }
+
+  const requiredRole = getRequiredRole(location.pathname);
+  if (user && requiredRole && user.role !== requiredRole) {
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
   }
 
   if (!user) {
@@ -46,7 +68,7 @@ export const Layout: React.FC = () => {
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <header className="bg-indigo-600 text-white shadow-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-3 cursor-pointer" onClick={() => navigate('/instructor/dashboard')}>
+          <div className="flex items-center space-x-3 cursor-pointer" onClick={() => navigate(getHomePath(user.role))}>
             <BookOpen className="w-6 h-6" />
             <span className="font-bold text-xl tracking-tight">InClass</span>
           </div>

@@ -35,17 +35,18 @@ export const LoginPage: React.FC = () => {
       }
       
       localStorage.setItem('demo_token', response.token);
-      localStorage.setItem('demo_role', selectedRole);
+      localStorage.setItem('demo_role', selectedRole.toLowerCase());
+      localStorage.setItem('demo_user', JSON.stringify(response.user));
       
       if (selectedRole === 'INSTRUCTOR') {
         navigate('/instructor/dashboard');
       } else if (selectedRole === 'ADMIN') {
         alert('Admin dashboard coming soon');
       } else {
-        alert('Student view not implemented in Task 1');
+        navigate('/student/dashboard');
       }
-    } catch (err: any) {
-      setError(err.message || 'Authentication failed. Please try again.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Authentication failed. Please try again.');
     } finally {
       setIsLoading(false);
     }

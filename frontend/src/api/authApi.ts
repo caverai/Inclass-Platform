@@ -1,5 +1,34 @@
 
-import type { User } from '../types';
+import type { Role, User } from '../types';
+
+const normalizeRole = (role: string | null): Role | null => {
+  if (!role) return null;
+  const normalized = role.toUpperCase();
+  if (normalized === 'INSTRUCTOR' || normalized === 'STUDENT' || normalized === 'ADMIN') {
+    return normalized;
+  }
+  return null;
+};
+
+const getStoredDemoUser = (): User | null => {
+  const storedUser = localStorage.getItem('demo_user');
+  if (!storedUser) return null;
+
+  try {
+    const parsed = JSON.parse(storedUser) as Partial<User>;
+    const role = normalizeRole(parsed.role ?? localStorage.getItem('demo_role'));
+    if (!parsed.email || !parsed.name || !role) return null;
+
+    return {
+      id: parsed.id || (role === 'INSTRUCTOR' ? 'inst-1' : role === 'STUDENT' ? 'stu-1' : 'admin-1'),
+      email: parsed.email,
+      name: parsed.name,
+      role,
+    };
+  } catch {
+    return null;
+  }
+};
 
 export const authApi = {
   login: async (role: Role, email?: string, password?: string) => {
@@ -25,7 +54,7 @@ export const authApi = {
     });
   },
 
-  register: async (role: Role, email: string, name: string, password?: string) => {
+  register: async (role: Role, email: string, name: string, _password?: string) => {
     return new Promise<{ token: string; user: User }>((resolve) => {
       setTimeout(() => {
         resolve({
@@ -45,13 +74,19 @@ export const authApi = {
     // Return mock user based on role in token/localStorage
     return new Promise<User>((resolve, reject) => {
       setTimeout(() => {
-        const role = localStorage.getItem('demo_role');
+        const storedDemoUser = getStoredDemoUser();
+        if (storedDemoUser) {
+          resolve(storedDemoUser);
+          return;
+        }
+
+        const role = normalizeRole(localStorage.getItem('demo_role'));
         if (role) {
           resolve({
-            id: role === 'INSTRUCTOR' ? 'inst-1' : 'stu-1',
-            email: role === 'INSTRUCTOR' ? 'instructor@example.com' : 'student@example.com',
-            name: role === 'INSTRUCTOR' ? 'Dr. Smith' : 'John Doe',
-            role: role as 'INSTRUCTOR' | 'STUDENT',
+            id: role === 'INSTRUCTOR' ? 'inst-1' : role === 'STUDENT' ? 'stu-1' : 'admin-1',
+            email: role === 'INSTRUCTOR' ? 'instructor@example.com' : role === 'STUDENT' ? 'student@example.com' : 'admin@example.com',
+            name: role === 'INSTRUCTOR' ? 'Dr. Smith' : role === 'STUDENT' ? 'John Doe' : 'Admin User',
+            role,
           });
         } else {
           reject(new Error('Not authenticated'));

@@ -7,9 +7,9 @@ let mockActivities: Activity[] = [
     id: 'act-1',
     courseId: 'course-1',
     activityNumber: 1,
-    text: 'Analyze the ethical implications of AI in healthcare.',
+    text: 'Explain how active retrieval and targeted feedback help students correct mistakes during learning.',
     status: 'NOT_STARTED',
-    learningObjectives: ['Understand AI ethics', 'Apply ethical frameworks to healthcare'],
+    learningObjectives: ['Explain active retrieval as recall from memory', 'Explain how feedback helps students correct mistakes'],
   },
   {
     id: 'act-2',
