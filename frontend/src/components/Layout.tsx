@@ -22,6 +22,9 @@ export const Layout: React.FC = () => {
   const location = useLocation();
   const [user, setUser] = useState<User | null>(null);
 
+  const publicPaths = ['/student/login', '/student/register', '/instructor/login', '/login'];
+  const isPublicPath = publicPaths.includes(location.pathname);
+
   useEffect(() => {
     const fetchUser = async () => {
       try {
@@ -36,23 +39,25 @@ export const Layout: React.FC = () => {
 
         setUser(currentUser);
       } catch {
-        navigate('/login', { replace: true });
+        if (!isPublicPath) {
+          navigate('/student/login', { replace: true });
+        }
       }
     };
     
-    if (location.pathname !== '/login') {
+    if (!isPublicPath) {
       fetchUser();
     }
-  }, [navigate, location.pathname]);
+  }, [navigate, location.pathname, isPublicPath]);
 
   const handleLogout = () => {
     localStorage.removeItem('demo_token');
     localStorage.removeItem(DEMO_ROLE_KEY);
     localStorage.removeItem(DEMO_USER_KEY);
-    navigate('/login');
+    navigate('/student/login');
   };
 
-  if (location.pathname === '/login') {
+  if (isPublicPath) {
     return <Outlet />;
   }
 

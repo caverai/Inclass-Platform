@@ -19,6 +19,7 @@ load_dotenv()
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -44,14 +45,16 @@ from app.services import (
     instructorLogin,
     listActivities,
     listMyCourses,
+    registerStudent,
+    resetActivity,
     setInstructorPassword,
     startActivity,
+    studentLogin,
     submitAnswer,
     update_user_password,
     updateActivity,
     submitManualGrade,
     getStudentActivity,
-    resetActivity,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -66,7 +69,7 @@ logger = logging.getLogger("inclass.auth")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup işlemleri ---
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=0, max_size=10)
     app.state.db_pool = pool
     services.db_pool = pool
     logger.info("Database connection pool created.")
@@ -83,6 +86,14 @@ app = FastAPI(
     description="Google Federated Sign-In with role-based access",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
@@ -114,6 +125,25 @@ class AuthResponse(BaseModel):
     user_id: str
     role: str
     email: str
+    name: Optional[str] = None
+
+
+class StudentRegisterRequest(BaseModel):
+    """
+    @brief Request model for student registration.
+    """
+    full_name: str
+    email: str
+    password: str
+    confirm_password: str
+
+
+class StudentLoginRequest(BaseModel):
+    """
+    @brief Request model for student login.
+    """
+    email: str
+    password: str
 
 
 class InstructorLoginRequest(BaseModel):
@@ -648,7 +678,60 @@ async def api_instructor_login(
             detail="Email and password are required.",
         )
 
-    result = await instructorLogin(email=email, password=password)
+    return await instructorLogin(email, password)
+
+
+@app.post(
+    "/student/register",
+    response_model=AuthResponse,
+    summary="Student self-registration",
+    tags=["Authentication"],
+)
+async def api_student_register(body: StudentRegisterRequest) -> AuthResponse:
+    """
+    @brief Registers a new student.
+    """
+    if body.password != body.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match."
+        )
+    
+    if not body.full_name or not body.email or not body.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="All fields are required."
+        )
+
+    enforce_school_email(body.email)
+    
+    result = await registerStudent(
+        email=body.email,
+        password=body.password,
+        full_name=body.full_name
+    )
+    return AuthResponse(**result)
+
+
+@app.post(
+    "/student/login",
+    response_model=AuthResponse,
+    summary="Student password-based login",
+    tags=["Authentication"],
+)
+async def api_student_login(body: StudentLoginRequest) -> AuthResponse:
+    """
+    @brief Validates student credentials and issues a JWT.
+    """
+    if not body.email or not body.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email and password are required.",
+        )
+
+    enforce_school_email(body.email)
+    
+    result = await studentLogin(email=body.email, password=body.password)
     return AuthResponse(**result)
 
 

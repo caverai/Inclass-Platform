@@ -3,6 +3,8 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { Layout } from './components/Layout';
 import { InstructorRoute, StudentRoute } from './components/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
+import { StudentRegisterPage } from './pages/StudentRegisterPage';
+import { StudentLoginPage } from './pages/StudentLoginPage';
 import { InstructorDashboard } from './pages/InstructorDashboard';
 import { InstructorCoursePage } from './pages/InstructorCoursePage';
 import { ActivityFormPage } from './pages/ActivityFormPage';
@@ -14,10 +16,13 @@ function App() {
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="/" element={<Navigate to="/student/login" replace />} />
         
         <Route element={<Layout />}>
-          <Route path="/login" element={<LoginPage />} />
+          <Route path="/login" element={<Navigate to="/student/login" replace />} />
+          <Route path="/student/login" element={<StudentLoginPage />} />
+          <Route path="/student/register" element={<StudentRegisterPage />} />
+          <Route path="/instructor/login" element={<LoginPage />} />
           
           <Route element={<InstructorRoute />}>
             <Route path="/instructor/dashboard" element={<InstructorDashboard />} />

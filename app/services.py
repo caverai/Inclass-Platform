@@ -331,6 +331,70 @@ async def instructorLogin(email: str, password: str) -> dict:
     }
 
 
+async def studentLogin(email: str, password: str) -> dict:
+    """
+    @brief Authenticates a student using their email and password.
+    """
+    pool = db_pool
+    student = await fetch_registered_student_by_email(pool, email)
+
+    stored_hash = await fetch_password_hash_by_email(pool, email)
+    if not stored_hash or not PasswordHasher.verify(password, stored_hash):
+        logger.warning("Login failed: Incorrect password for student=%s", email)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    access_token = create_access_token(
+        user_id=str(student["id"]),
+        email=student["school_email"],
+        role=student["role"],
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": str(student["id"]),
+        "role": student["role"],
+        "email": student["school_email"],
+    }
+
+
+async def registerStudent(email: str, password: str, full_name: str) -> dict:
+    """
+    @brief Registers a new student.
+    """
+    pool = db_pool
+    hashed_password = PasswordHasher.hash(password)
+
+    query = """
+        INSERT INTO users (school_email, full_name, role, password_hash)
+        VALUES ($1, $2, 'student', $3)
+        RETURNING id, school_email, role, full_name
+    """
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(query, email.lower(), full_name, hashed_password)
+    except UniqueViolationError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this email already exists."
+        )
+
+    access_token = create_access_token(
+        user_id=str(row["id"]),
+        email=row["school_email"],
+        role=row["role"],
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": str(row["id"]),
+        "role": row["role"],
+        "email": row["school_email"],
+        "name": row["full_name"]
+    }
+
+
 async def listMyCourses(email: str, password: str) -> dict:
     """
     @brief Retrieves the courses assigned to an instructor after optional credential validation.

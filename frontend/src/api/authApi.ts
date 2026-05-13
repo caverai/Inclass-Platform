@@ -1,98 +1,52 @@
-
+import { apiClient } from './client';
 import type { Role, User } from '../types';
-import { DEMO_ROLE_KEY, DEMO_USER_KEY } from '../utils/demoAuth';
 
 const normalizeRole = (role: string | null): Role | null => {
   if (!role) return null;
   const normalized = role.toUpperCase();
   if (normalized === 'INSTRUCTOR' || normalized === 'STUDENT' || normalized === 'ADMIN') {
-    return normalized;
+    return normalized as Role;
   }
   return null;
 };
 
-const getStoredDemoUser = (): User | null => {
-  const storedUser = localStorage.getItem(DEMO_USER_KEY);
-  if (!storedUser) return null;
-
-  try {
-    const parsed = JSON.parse(storedUser) as Partial<User>;
-    const role = normalizeRole(localStorage.getItem(DEMO_ROLE_KEY));
-    if (!parsed.email || !parsed.name || !role) return null;
-
-    return {
-      id: parsed.id || (role === 'INSTRUCTOR' ? 'inst-1' : role === 'STUDENT' ? 'stu-1' : 'admin-1'),
-      email: parsed.email,
-      name: parsed.name,
-      role,
-    };
-  } catch {
-    return null;
-  }
+const mapMeToUser = (raw: Record<string, any>): User => {
+  const role = normalizeRole(String(raw.role ?? ''));
+  if (!role) throw new Error('Invalid role from server');
+  return {
+    id: String(raw.user_id ?? raw.id ?? ''),
+    email: String(raw.email ?? ''),
+    name: String(raw.name ?? raw.full_name ?? raw.email ?? 'User'),
+    role,
+  };
 };
 
 export const authApi = {
-  login: async (role: Role, email?: string, password?: string) => {
-    // Mock login for demo purposes
-    return new Promise<{ token: string; user: User }>((resolve, reject) => {
-      setTimeout(() => {
-        // Simple mock validation
-        if (password === 'error') {
-          reject(new Error('Invalid credentials'));
-          return;
-        }
-
-        resolve({
-          token: 'mock-jwt-token',
-          user: {
-            id: `id-${Math.random()}`,
-            email: email || `${role.toLowerCase()}@example.com`,
-            name: role.charAt(0) + role.slice(1).toLowerCase() + ' User',
-            role,
-          },
-        });
-      }, 500);
-    });
+  login: async (role: Role, email: string, password: string): Promise<{ token: string }> => {
+    const endpoint =
+      role === 'INSTRUCTOR' ? '/instructor/login' : '/student/login';
+    const res = await apiClient.post(endpoint, { email, password });
+    const data = res.data as Record<string, any>;
+    const token = String(data.access_token ?? '');
+    if (!token) throw new Error('No access token returned');
+    return { token };
   },
 
-  register: async (role: Role, email: string, name: string, _password?: string) => {
-    return new Promise<{ token: string; user: User }>((resolve) => {
-      setTimeout(() => {
-        resolve({
-          token: 'mock-jwt-token',
-          user: {
-            id: `id-${Math.random()}`,
-            email: email,
-            name: name,
-            role,
-          },
-        });
-      }, 800);
+  studentRegister: async (fullName: string, email: string, password: string, confirmPassword: string): Promise<{ token: string }> => {
+    const res = await apiClient.post('/student/register', { 
+      full_name: fullName, 
+      email, 
+      password, 
+      confirm_password: confirmPassword 
     });
+    const data = res.data as Record<string, any>;
+    const token = String(data.access_token ?? '');
+    if (!token) throw new Error('No access token returned');
+    return { token };
   },
 
-  getMe: async () => {
-    // Return mock user based on role in token/localStorage
-    return new Promise<User>((resolve, reject) => {
-      setTimeout(() => {
-        const storedDemoUser = getStoredDemoUser();
-        if (storedDemoUser) {
-          resolve(storedDemoUser);
-          return;
-        }
-
-        const role = normalizeRole(localStorage.getItem(DEMO_ROLE_KEY));
-        if (role) {
-          resolve({
-            id: role === 'INSTRUCTOR' ? 'inst-1' : role === 'STUDENT' ? 'stu-1' : 'admin-1',
-            email: role === 'INSTRUCTOR' ? 'instructor@example.com' : role === 'STUDENT' ? 'student@example.com' : 'admin@example.com',
-            name: role === 'INSTRUCTOR' ? 'Dr. Smith' : role === 'STUDENT' ? 'John Doe' : 'Admin User',
-            role,
-          });
-        } else {
-          reject(new Error('Not authenticated'));
-        }
-      }, 300);
-    });
+  getMe: async (): Promise<User> => {
+    const res = await apiClient.get('/auth/me');
+    return mapMeToUser(res.data as Record<string, any>);
   },
 };
