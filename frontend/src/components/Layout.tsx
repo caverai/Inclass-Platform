@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { LogOut, BookOpen } from 'lucide-react';
 import { authApi } from '../api/authApi';
 import type { User } from '../types';
+import { DEMO_ROLE_KEY, DEMO_USER_KEY } from '../utils/demoAuth';
 
 const getRequiredRole = (path: string): User['role'] | null => {
   if (path.startsWith('/instructor')) return 'INSTRUCTOR';
@@ -46,8 +47,8 @@ export const Layout: React.FC = () => {
 
   const handleLogout = () => {
     localStorage.removeItem('demo_token');
-    localStorage.removeItem('demo_role');
-    localStorage.removeItem('demo_user');
+    localStorage.removeItem(DEMO_ROLE_KEY);
+    localStorage.removeItem(DEMO_USER_KEY);
     navigate('/login');
   };
 

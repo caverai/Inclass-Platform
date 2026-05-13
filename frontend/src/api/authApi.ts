@@ -1,5 +1,6 @@
 
 import type { Role, User } from '../types';
+import { DEMO_ROLE_KEY, DEMO_USER_KEY } from '../utils/demoAuth';
 
 const normalizeRole = (role: string | null): Role | null => {
   if (!role) return null;
@@ -11,12 +12,12 @@ const normalizeRole = (role: string | null): Role | null => {
 };
 
 const getStoredDemoUser = (): User | null => {
-  const storedUser = localStorage.getItem('demo_user');
+  const storedUser = localStorage.getItem(DEMO_USER_KEY);
   if (!storedUser) return null;
 
   try {
     const parsed = JSON.parse(storedUser) as Partial<User>;
-    const role = normalizeRole(parsed.role ?? localStorage.getItem('demo_role'));
+    const role = normalizeRole(localStorage.getItem(DEMO_ROLE_KEY));
     if (!parsed.email || !parsed.name || !role) return null;
 
     return {
@@ -80,7 +81,7 @@ export const authApi = {
           return;
         }
 
-        const role = normalizeRole(localStorage.getItem('demo_role'));
+        const role = normalizeRole(localStorage.getItem(DEMO_ROLE_KEY));
         if (role) {
           resolve({
             id: role === 'INSTRUCTOR' ? 'inst-1' : role === 'STUDENT' ? 'stu-1' : 'admin-1',

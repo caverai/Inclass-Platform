@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Navigate, Outlet } from 'react-router-dom';
+import { getDemoRole, type DemoRole } from '../utils/demoAuth';
 
-type DemoRole = 'student' | 'instructor';
 type RouteCheckStatus = 'checking' | 'ready';
 
 interface ProtectedRouteProps {
@@ -13,17 +13,12 @@ const DASHBOARD_BY_ROLE: Record<DemoRole, string> = {
   instructor: '/instructor/dashboard',
 };
 
-const normalizeDemoRole = (role: string | null): DemoRole | null => {
-  if (role === 'student' || role === 'instructor') return role;
-  return null;
-};
-
 export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ allowedRole }) => {
   const [status, setStatus] = useState<RouteCheckStatus>('checking');
   const [role, setRole] = useState<DemoRole | null>(null);
 
   useEffect(() => {
-    setRole(normalizeDemoRole(localStorage.getItem('demo_role')));
+    setRole(getDemoRole());
     setStatus('ready');
   }, []);
 

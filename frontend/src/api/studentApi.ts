@@ -2,6 +2,7 @@ import { isAxiosError } from 'axios';
 import { apiClient } from './client';
 import { instructorApi } from './instructorApi';
 import type { ActivityStatus, Course } from '../types';
+import { getDemoStudentEmail } from '../utils/demoAuth';
 
 export type StudentDataSource = 'backend' | 'mock';
 export type StudentAccessReason = 'NOT_STARTED' | 'ENDED' | 'UNAUTHORIZED';
@@ -74,8 +75,11 @@ interface MockProgress {
   chatHistory: StudentChatMessage[];
 }
 
-const mockProgressByActivityId: Record<string, MockProgress> = {};
+const mockProgressByKey: Record<string, MockProgress> = {};
 const MOCK_TOTAL_OBJECTIVES = 2;
+
+export const getMockProgressKey = (studentEmail: string, activityId: string) =>
+  `studentProgress:${studentEmail}:${activityId}`;
 
 const createMessageId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -146,6 +150,28 @@ const throwAccessError = (error: unknown): never => {
   throw new StudentActivityAccessError('UNAUTHORIZED', getAccessMessage('UNAUTHORIZED'));
 };
 
+const throwBackendChatError = (error: unknown): never => {
+  if (isAxiosError(error)) {
+    const statusCode = error.response?.status;
+    if (statusCode === 401 || statusCode === 403 || statusCode === 404) {
+      throwAccessError(error);
+    }
+  }
+
+  throw new Error('Unable to send your answer. Please try again.');
+};
+
+const throwBackendActivityError = (error: unknown): never => {
+  if (isAxiosError(error)) {
+    const statusCode = error.response?.status;
+    if (statusCode === 401 || statusCode === 403 || statusCode === 404) {
+      throwAccessError(error);
+    }
+  }
+
+  throw new Error('Unable to refresh this activity. Please try again.');
+};
+
 const normalizeStatus = (value: unknown): ActivityStatus | undefined => {
   const status = String(value ?? '').toUpperCase();
   if (status === 'NOT_STARTED' || status === 'ACTIVE' || status === 'ENDED') {
@@ -173,61 +199,125 @@ const normalizeActivitySummary = (
   completed: typeof raw.completed === 'boolean' ? raw.completed : undefined,
 });
 
-const normalizeMessage = (raw: Record<string, unknown>, index: number): StudentChatMessage => {
-  const senderValue = String(raw.sender ?? raw.role ?? '').toLowerCase();
+const normalizeMessage = (raw: unknown, index: number): StudentChatMessage => {
+  const messageRaw =
+    typeof raw === 'object' && raw !== null
+      ? (raw as Record<string, unknown>)
+      : { content: raw };
+  const senderValue = String(messageRaw.sender ?? messageRaw.role ?? '').toLowerCase();
   const sender = senderValue === 'student' || senderValue === 'user' ? 'student' : 'tutor';
 
   return {
-    id: String(raw.id ?? `history-${index}`),
+    id: String(messageRaw.id ?? `history-${index}`),
     sender,
-    content: String(raw.content ?? raw.message ?? raw.text ?? ''),
-    miniLesson: raw.miniLesson
-      ? String(raw.miniLesson)
-      : raw.mini_lesson
-        ? String(raw.mini_lesson)
+    content: String(messageRaw.content ?? messageRaw.message ?? messageRaw.text ?? ''),
+    miniLesson: messageRaw.miniLesson
+      ? String(messageRaw.miniLesson)
+      : messageRaw.mini_lesson
+        ? String(messageRaw.mini_lesson)
         : undefined,
-    isCelebration: Boolean(raw.completed ?? raw.isCelebration ?? raw.is_celebration),
-    timestamp: String(raw.timestamp ?? new Date().toISOString()),
+    isCelebration: Boolean(messageRaw.completed ?? messageRaw.isCelebration ?? messageRaw.is_celebration),
+    timestamp: String(messageRaw.timestamp ?? new Date().toISOString()),
   };
+};
+
+const normalizeStoredMessages = (messages: unknown): StudentChatMessage[] => {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((message, index) => normalizeMessage(message, index));
+};
+
+const normalizeMockProgress = (raw: unknown): MockProgress | null => {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const candidate = raw as Partial<MockProgress>;
+
+  return {
+    score: typeof candidate.score === 'number' ? candidate.score : 0,
+    completed: Boolean(candidate.completed),
+    awardedActiveRetrieval: Boolean(candidate.awardedActiveRetrieval),
+    awardedFeedback: Boolean(candidate.awardedFeedback),
+    chatHistory: normalizeStoredMessages(candidate.chatHistory),
+  };
+};
+
+const readStoredMockProgress = (key: string): MockProgress | null => {
+  const memoryProgress = mockProgressByKey[key];
+  if (memoryProgress) return memoryProgress;
+
+  const storedProgress = localStorage.getItem(key);
+  if (!storedProgress) return null;
+
+  try {
+    const normalizedProgress = normalizeMockProgress(JSON.parse(storedProgress));
+    if (!normalizedProgress) return null;
+    mockProgressByKey[key] = normalizedProgress;
+    return normalizedProgress;
+  } catch {
+    localStorage.removeItem(key);
+    return null;
+  }
+};
+
+const persistMockProgress = (key: string, progress: MockProgress) => {
+  mockProgressByKey[key] = progress;
+  localStorage.setItem(key, JSON.stringify(progress));
+};
+
+const stripObjectiveFields = (raw: Record<string, unknown>): Record<string, unknown> => {
+  const studentSafeRaw = { ...raw };
+  delete studentSafeRaw.objectives;
+  delete studentSafeRaw.learningObjectives;
+  delete studentSafeRaw.learning_objectives;
+  return studentSafeRaw;
 };
 
 const normalizeActivityDetail = (
   raw: Record<string, unknown>,
   activityId: string,
 ): StudentActivityDetail => {
-  const courseId = String(raw.courseId ?? raw.course_id ?? '');
-  const chatRaw = Array.isArray(raw.chatHistory)
-    ? raw.chatHistory
-    : Array.isArray(raw.chat_history)
-      ? raw.chat_history
+  const studentSafeRaw = stripObjectiveFields(raw);
+  const courseId = String(studentSafeRaw.courseId ?? studentSafeRaw.course_id ?? '');
+  const chatRaw = Array.isArray(studentSafeRaw.chatHistory)
+    ? studentSafeRaw.chatHistory
+    : Array.isArray(studentSafeRaw.chat_history)
+      ? studentSafeRaw.chat_history
       : [];
-  const chatHistory = chatRaw.map((message, index) =>
-    normalizeMessage(message as Record<string, unknown>, index),
-  );
-  const nextQuestion = raw.nextQuestion ?? raw.next_question ?? null;
+  const chatHistory = chatRaw.map((message, index) => normalizeMessage(message, index));
+  const nextQuestion = studentSafeRaw.nextQuestion ?? studentSafeRaw.next_question ?? null;
 
   if (nextQuestion && chatHistory.length === 0) {
     chatHistory.push(buildTutorMessage(String(nextQuestion)));
   }
 
   return {
-    id: String(raw.id ?? raw.activity_id ?? activityId),
+    id: String(studentSafeRaw.id ?? studentSafeRaw.activity_id ?? activityId),
     courseId,
-    activityNumber: Number(raw.activityNumber ?? raw.activity_no ?? raw.activity_number ?? 1),
-    title: raw.title ? String(raw.title) : undefined,
-    text: String(raw.text ?? raw.activity_text ?? raw.description ?? raw.prompt ?? ''),
-    status: normalizeStatus(raw.status) ?? 'ACTIVE',
-    score: Number(raw.score ?? raw.current_score ?? 0),
-    totalObjectives: raw.totalObjectives
-      ? Number(raw.totalObjectives)
-      : raw.total_objectives
-        ? Number(raw.total_objectives)
+    activityNumber: Number(studentSafeRaw.activityNumber ?? studentSafeRaw.activity_no ?? studentSafeRaw.activity_number ?? 1),
+    title: studentSafeRaw.title ? String(studentSafeRaw.title) : undefined,
+    text: String(studentSafeRaw.text ?? studentSafeRaw.activity_text ?? studentSafeRaw.description ?? studentSafeRaw.prompt ?? ''),
+    status: normalizeStatus(studentSafeRaw.status) ?? 'ACTIVE',
+    score: Number(studentSafeRaw.score ?? studentSafeRaw.current_score ?? 0),
+    totalObjectives: studentSafeRaw.totalObjectives
+      ? Number(studentSafeRaw.totalObjectives)
+      : studentSafeRaw.total_objectives
+        ? Number(studentSafeRaw.total_objectives)
         : undefined,
-    completed: Boolean(raw.completed ?? raw.is_completed),
+    completed: Boolean(studentSafeRaw.completed ?? studentSafeRaw.is_completed),
     nextQuestion: nextQuestion ? String(nextQuestion) : null,
     chatHistory,
     source: 'backend',
   };
+};
+
+const requireOpenActivity = (activity: StudentActivityDetail): StudentActivityDetail => {
+  if (activity.status === 'NOT_STARTED') {
+    throw new StudentActivityAccessError('NOT_STARTED', getAccessMessage('NOT_STARTED'));
+  }
+
+  if (activity.status === 'ENDED') {
+    throw new StudentActivityAccessError('ENDED', getAccessMessage('ENDED'));
+  }
+
+  return activity;
 };
 
 const findMockActivity = async (activityId: string) => {
@@ -242,8 +332,13 @@ const findMockActivity = async (activityId: string) => {
   throw new StudentActivityAccessError('UNAUTHORIZED', getAccessMessage('UNAUTHORIZED'));
 };
 
-const getMockProgress = (activityId: string, activityText: string): MockProgress => {
-  const existing = mockProgressByActivityId[activityId];
+const getMockProgress = (
+  studentEmail: string,
+  activityId: string,
+  activityText: string,
+): MockProgress => {
+  const key = getMockProgressKey(studentEmail, activityId);
+  const existing = readStoredMockProgress(key);
   if (existing) return existing;
 
   const progress: MockProgress = {
@@ -255,7 +350,7 @@ const getMockProgress = (activityId: string, activityText: string): MockProgress
       buildTutorMessage(`Activity text: ${activityText}\n\n${firstMockQuestion}`),
     ],
   };
-  mockProgressByActivityId[activityId] = progress;
+  persistMockProgress(key, progress);
   return progress;
 };
 
@@ -266,6 +361,7 @@ const getNextMockQuestion = (progress: MockProgress) => {
 };
 
 const getMockStudentCourses = async (): Promise<StudentCourse[]> => {
+  const studentEmail = getDemoStudentEmail();
   const courses = await instructorApi.getCourses();
   const coursesWithActivities = await Promise.all(
     courses.map(async (course) => {
@@ -275,7 +371,7 @@ const getMockStudentCourses = async (): Promise<StudentCourse[]> => {
         activities: activities
           .sort((left, right) => left.activityNumber - right.activityNumber)
           .map((activity) => {
-            const progress = mockProgressByActivityId[activity.id];
+            const progress = readStoredMockProgress(getMockProgressKey(studentEmail, activity.id));
             return {
               id: activity.id,
               courseId: activity.courseId,
@@ -305,7 +401,8 @@ const getMockStudentActivity = async (activityId: string): Promise<StudentActivi
     throw new StudentActivityAccessError('ENDED', getAccessMessage('ENDED'));
   }
 
-  const progress = getMockProgress(activity.id, activity.text);
+  const studentEmail = getDemoStudentEmail();
+  const progress = getMockProgress(studentEmail, activity.id, activity.text);
 
   return {
     id: activity.id,
@@ -334,7 +431,9 @@ const runMockChat = async (activityId: string, answer: string): Promise<StudentC
     throw new StudentActivityAccessError('ENDED', getAccessMessage('ENDED'));
   }
 
-  const progress = getMockProgress(activity.id, activity.text);
+  const studentEmail = getDemoStudentEmail();
+  const progressKey = getMockProgressKey(studentEmail, activity.id);
+  const progress = getMockProgress(studentEmail, activity.id, activity.text);
   progress.chatHistory.push(buildStudentMessage(answer));
 
   const normalizedAnswer = answer.toLowerCase();
@@ -387,6 +486,7 @@ const runMockChat = async (activityId: string, answer: string): Promise<StudentC
     isCelebration: progress.completed,
   });
   progress.chatHistory.push(tutorChatMessage);
+  persistMockProgress(progressKey, progress);
 
   return {
     tutorMessage,
@@ -448,11 +548,22 @@ export const studentApi = {
     }
   },
 
-  getActivity: async (activityId: string): Promise<StudentActivityDetail> => {
+  getActivity: async (
+    activityId: string,
+    source?: StudentDataSource,
+  ): Promise<StudentActivityDetail> => {
+    if (source === 'mock') {
+      return getMockStudentActivity(activityId);
+    }
+
     try {
       const response = await apiClient.get(`/student/activities/${activityId}`);
-      return normalizeActivityDetail(response.data, activityId);
+      return requireOpenActivity(normalizeActivityDetail(response.data, activityId));
     } catch (error) {
+      if (source === 'backend') {
+        throwBackendActivityError(error);
+      }
+
       if (shouldUseMockFallback(error)) {
         return getMockStudentActivity(activityId);
       }
@@ -460,11 +571,23 @@ export const studentApi = {
     }
   },
 
-  sendChatMessage: async (activityId: string, answer: string): Promise<StudentChatResponse> => {
+  sendChatMessage: async (
+    activityId: string,
+    answer: string,
+    source?: StudentDataSource,
+  ): Promise<StudentChatResponse> => {
+    if (source === 'mock') {
+      return runMockChat(activityId, answer);
+    }
+
     try {
       const response = await apiClient.post(`/student/activities/${activityId}/chat`, { answer });
       return normalizeChatResponse(response.data);
     } catch (error) {
+      if (source === 'backend') {
+        throwBackendChatError(error);
+      }
+
       if (shouldUseMockFallback(error)) {
         return runMockChat(activityId, answer);
       }

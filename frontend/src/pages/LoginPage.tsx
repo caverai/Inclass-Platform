@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { authApi } from '../api/authApi';
 import { BookOpen, GraduationCap, Lock, Mail, User as UserIcon, ShieldCheck } from 'lucide-react';
 import type { Role } from '../types';
+import { DEMO_ROLE_KEY, DEMO_USER_KEY } from '../utils/demoAuth';
 
 export const LoginPage: React.FC = () => {
   const navigate = useNavigate();
@@ -35,8 +36,8 @@ export const LoginPage: React.FC = () => {
       }
       
       localStorage.setItem('demo_token', response.token);
-      localStorage.setItem('demo_role', selectedRole.toLowerCase());
-      localStorage.setItem('demo_user', JSON.stringify(response.user));
+      localStorage.setItem(DEMO_ROLE_KEY, selectedRole.toLowerCase());
+      localStorage.setItem(DEMO_USER_KEY, JSON.stringify(response.user));
       
       if (selectedRole === 'INSTRUCTOR') {
         navigate('/instructor/dashboard');

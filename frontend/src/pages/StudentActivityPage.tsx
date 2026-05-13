@@ -42,6 +42,7 @@ export const StudentActivityPage: React.FC = () => {
   const { activityId } = useParams<{ activityId: string }>();
   const navigate = useNavigate();
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const sendInFlightRef = useRef(false);
 
   const [activity, setActivity] = useState<StudentActivityDetail | null>(null);
   const [messages, setMessages] = useState<StudentChatMessage[]>([]);
@@ -51,6 +52,8 @@ export const StudentActivityPage: React.FC = () => {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    let isActive = true;
+
     const loadActivity = async () => {
       if (!activityId) return;
 
@@ -58,24 +61,33 @@ export const StudentActivityPage: React.FC = () => {
         setIsLoading(true);
         setError('');
         const data = await studentApi.getActivity(activityId);
+        if (!isActive) return;
         setActivity(data);
         setMessages(data.chatHistory);
       } catch (err) {
+        if (!isActive) return;
         if (err instanceof StudentActivityAccessError) {
           setError(err.message);
         } else {
           setError(err instanceof Error ? err.message : 'Unable to open this activity.');
         }
       } finally {
-        setIsLoading(false);
+        if (isActive) setIsLoading(false);
       }
     };
 
     loadActivity();
+
+    return () => {
+      isActive = false;
+    };
   }, [activityId]);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    const frame = window.requestAnimationFrame(() => {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [messages.length]);
 
   const completedObjectives = activity?.score ?? 0;
@@ -90,18 +102,49 @@ export const StudentActivityPage: React.FC = () => {
 
   const disabledReason = useMemo(() => {
     if (!activity) return '';
+    if (activity.status === 'NOT_STARTED') return 'This activity has not started yet.';
     if (activity.status === 'ENDED') return 'This activity has ended.';
     if (activity.completed) return 'Activity completed.';
     return '';
   }, [activity]);
 
-  const handleSend = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!activityId || !activity || disabledReason || isSending) return;
+  const statusBanner = useMemo(() => {
+    if (!activity) return '';
+    if (activity.status === 'NOT_STARTED') return 'This activity has not started yet.';
+    if (activity.status === 'ENDED') return 'This activity has ended. Your chat input is disabled.';
+    return '';
+  }, [activity]);
+
+  const activitySource = activity?.source;
+  const isActivityCompleted = Boolean(activity?.completed);
+
+  useEffect(() => {
+    if (!activityId || !activitySource || disabledReason || isActivityCompleted) return;
+
+    const intervalId = window.setInterval(async () => {
+      try {
+        await studentApi.getActivity(activityId, activitySource);
+      } catch (err) {
+        if (!(err instanceof StudentActivityAccessError)) return;
+        if (err.reason !== 'ENDED' && err.reason !== 'NOT_STARTED') return;
+
+        setError(err.message);
+        setActivity((currentActivity) =>
+          currentActivity ? { ...currentActivity, status: err.reason } : currentActivity,
+        );
+      }
+    }, 3000);
+
+    return () => window.clearInterval(intervalId);
+  }, [activityId, activitySource, isActivityCompleted, disabledReason]);
+
+  const submitAnswer = async () => {
+    if (!activityId || !activity || disabledReason || sendInFlightRef.current) return;
 
     const trimmedAnswer = answer.trim();
     if (!trimmedAnswer) return;
 
+    sendInFlightRef.current = true;
     const studentMessage = createStudentMessage(trimmedAnswer);
     setMessages((currentMessages) => [...currentMessages, studentMessage]);
     setAnswer('');
@@ -109,7 +152,7 @@ export const StudentActivityPage: React.FC = () => {
     setError('');
 
     try {
-      const response = await studentApi.sendChatMessage(activityId, trimmedAnswer);
+      const response = await studentApi.sendChatMessage(activityId, trimmedAnswer, activity.source);
       const tutorMessage = createTutorMessage(
         response.tutorMessage,
         response.miniLesson,
@@ -125,24 +168,39 @@ export const StudentActivityPage: React.FC = () => {
               completed: response.completed,
               status: response.status,
               nextQuestion: response.nextQuestion,
-              source: response.isMock ? 'mock' : currentActivity.source,
+              source: currentActivity.source,
             }
           : currentActivity,
       );
     } catch (err) {
+      setMessages((currentMessages) =>
+        currentMessages.filter((message) => message.id !== studentMessage.id),
+      );
       if (err instanceof StudentActivityAccessError) {
         setError(err.message);
-        if (err.reason === 'ENDED') {
+        if (err.reason === 'ENDED' || err.reason === 'NOT_STARTED') {
           setActivity((currentActivity) =>
-            currentActivity ? { ...currentActivity, status: 'ENDED' } : currentActivity,
+            currentActivity ? { ...currentActivity, status: err.reason } : currentActivity,
           );
         }
       } else {
         setError(err instanceof Error ? err.message : 'Unable to send your answer.');
       }
     } finally {
+      sendInFlightRef.current = false;
       setIsSending(false);
     }
+  };
+
+  const handleSend = (event: React.FormEvent) => {
+    event.preventDefault();
+    void submitAnswer();
+  };
+
+  const handleAnswerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    event.preventDefault();
+    void submitAnswer();
   };
 
   if (isLoading) {
@@ -202,6 +260,12 @@ export const StudentActivityPage: React.FC = () => {
       {activity.source === 'mock' && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           Mock tutoring mode is active. The scoring below is separated from backend scoring.
+        </div>
+      )}
+
+      {statusBanner && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-800">
+          {statusBanner}
         </div>
       )}
 
@@ -279,6 +343,7 @@ export const StudentActivityPage: React.FC = () => {
           <textarea
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}
+            onKeyDown={handleAnswerKeyDown}
             disabled={Boolean(disabledReason) || isSending}
             rows={2}
             className="min-h-12 flex-1 resize-none rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
