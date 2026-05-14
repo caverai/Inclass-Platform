@@ -8,4 +8,12 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  server: {
+    proxy: {
+      '/auth': 'http://localhost:8000',
+      '/student': 'http://localhost:8000',
+      '/instructor': 'http://localhost:8000',
+      '/health': 'http://localhost:8000',
+    },
+  },
 })
