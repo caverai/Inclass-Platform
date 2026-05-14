@@ -51,7 +51,9 @@ export const Layout: React.FC = () => {
   }, [navigate, location.pathname, isPublicPath]);
 
   const handleLogout = () => {
-    localStorage.removeItem('demo_token');
+    localStorage.removeItem('instructor_token');
+    localStorage.removeItem('student_token');
+    localStorage.removeItem('demo_token'); // clear any legacy key
     localStorage.removeItem(DEMO_ROLE_KEY);
     localStorage.removeItem(DEMO_USER_KEY);
     navigate('/student/login');

@@ -1729,3 +1729,76 @@ async def listActivities(
     rows = await pool.fetch("SELECT id, activity_no, title, description, status FROM activities WHERE course_id::text = $1 ORDER BY activity_no ASC", course_id)
     activities = [{"activity_id": str(r["id"]), "activity_no": r["activity_no"], "title": r["title"], "status": r["status"]} for r in rows]
     return {"activities": activities}
+
+
+async def getStudentCourses(email: str) -> list[dict]:
+    """
+    @brief Returns all courses a student is enrolled in, with their activities.
+    @details Each course includes a list of activities with the student's current
+             progress (score, completed) pulled from student_activity_progress.
+    """
+    pool = db_pool
+    student = await fetch_registered_student_by_email(pool, email)
+    student_id = student["id"]
+
+    # Fetch enrolled courses
+    course_rows = await pool.fetch(
+        """
+        SELECT c.id, c.course_code, c.course_name
+        FROM   courses c
+        JOIN   student_course_mapping scm ON scm.course_id = c.id
+        WHERE  scm.student_id = $1
+        ORDER  BY c.course_name ASC
+        """,
+        student_id,
+    )
+
+    courses: list[dict] = []
+    for course in course_rows:
+        course_id = str(course["id"])
+
+        # Fetch activities for this course
+        activity_rows = await pool.fetch(
+            """
+            SELECT
+                a.id,
+                a.activity_no,
+                a.title,
+                a.description,
+                a.status,
+                sap.current_score,
+                sap.completed
+            FROM   activities a
+            LEFT   JOIN student_activity_progress sap
+                   ON  sap.activity_id = a.id
+                   AND sap.student_id  = $1
+            WHERE  a.course_id::text = $2
+            ORDER  BY a.activity_no ASC
+            """,
+            student_id,
+            course_id,
+        )
+
+        activities = [
+            {
+                "activity_id":   str(r["id"]),
+                "activity_no":   r["activity_no"],
+                "title":         r["title"],
+                "description":   r["description"],
+                "status":        r["status"],
+                "current_score": int(r["current_score"]) if r["current_score"] is not None else 0,
+                "completed":     bool(r["completed"]) if r["completed"] is not None else False,
+            }
+            for r in activity_rows
+        ]
+
+        courses.append(
+            {
+                "course_id":   course_id,
+                "course_code": course["course_code"],
+                "course_name": course["course_name"],
+                "activities":  activities,
+            }
+        )
+
+    return courses

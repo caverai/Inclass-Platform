@@ -1,6 +1,5 @@
 import { isAxiosError } from 'axios';
 import { apiClient } from './client';
-import { instructorApi } from './instructorApi';
 import type { ActivityStatus, Course } from '../types';
 import { getDemoStudentEmail } from '../utils/demoAuth';
 
@@ -320,15 +319,9 @@ const requireOpenActivity = (activity: StudentActivityDetail): StudentActivityDe
   return activity;
 };
 
-const findMockActivity = async (activityId: string) => {
-  const courses = await instructorApi.getCourses();
-
-  for (const course of courses) {
-    const activities = await instructorApi.getCourseActivities(course.id);
-    const activity = activities.find((item) => item.id === activityId);
-    if (activity) return { course, activity };
-  }
-
+const findMockActivity = async (_activityId: string): Promise<never> => {
+  // Mock activity lookup is no longer supported — the real backend endpoints
+  // are required. Calling instructor APIs from a student session is forbidden.
   throw new StudentActivityAccessError('UNAUTHORIZED', getAccessMessage('UNAUTHORIZED'));
 };
 
@@ -361,33 +354,9 @@ const getNextMockQuestion = (progress: MockProgress) => {
 };
 
 const getMockStudentCourses = async (): Promise<StudentCourse[]> => {
-  const studentEmail = getDemoStudentEmail();
-  const courses = await instructorApi.getCourses();
-  const coursesWithActivities = await Promise.all(
-    courses.map(async (course) => {
-      const activities = await instructorApi.getCourseActivities(course.id);
-      return {
-        ...course,
-        activities: activities
-          .sort((left, right) => left.activityNumber - right.activityNumber)
-          .map((activity) => {
-            const progress = readStoredMockProgress(getMockProgressKey(studentEmail, activity.id));
-            return {
-              id: activity.id,
-              courseId: activity.courseId,
-              activityNumber: activity.activityNumber,
-              text: activity.text,
-              status: activity.status,
-              score: progress?.score,
-              completed: progress?.completed,
-            };
-          }),
-        source: 'mock' as const,
-      };
-    }),
-  );
-
-  return coursesWithActivities;
+  // No longer falls back to instructor API — that would send a student token
+  // to instructor endpoints and receive a 403. Return empty list gracefully.
+  return [];
 };
 
 const getMockStudentActivity = async (activityId: string): Promise<StudentActivityDetail> => {
@@ -523,19 +492,20 @@ export const studentApi = {
   getCourses: async (): Promise<StudentCourse[]> => {
     try {
       const response = await apiClient.get('/student/courses');
-      const rawCourses = Array.isArray(response.data) ? response.data : response.data?.courses ?? [];
-      return rawCourses.map((raw: Record<string, unknown>) => {
+      const rawCourses: Record<string, unknown>[] = Array.isArray(response.data)
+        ? response.data
+        : response.data?.courses ?? [];
+
+      return rawCourses.map((raw) => {
         const course = normalizeCourse(raw);
-        const rawActivities = Array.isArray(raw.activities)
-          ? raw.activities
-          : Array.isArray(raw.available_activities)
-            ? raw.available_activities
-            : [];
+        const rawActivities: Record<string, unknown>[] = Array.isArray(raw.activities)
+          ? (raw.activities as Record<string, unknown>[])
+          : [];
 
         return {
           ...course,
           activities: rawActivities.map((activity) =>
-            normalizeActivitySummary(activity as Record<string, unknown>, course.id),
+            normalizeActivitySummary(activity, course.id),
           ),
           source: 'backend' as const,
         };

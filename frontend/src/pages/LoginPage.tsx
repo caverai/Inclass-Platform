@@ -24,7 +24,7 @@ export const LoginPage: React.FC = () => {
       setIsLoading(true);
       const response = await authApi.login('INSTRUCTOR', email, password);
       
-      localStorage.setItem('demo_token', response.token);
+      localStorage.setItem('instructor_token', response.token);
       localStorage.setItem(DEMO_ROLE_KEY, 'instructor');
       
       const me = await authApi.getMe();

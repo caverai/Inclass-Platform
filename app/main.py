@@ -56,6 +56,7 @@ from app.services import (
     submitManualGrade,
     getStudentActivity,
     getActivityLogs,
+    getStudentCourses,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -584,6 +585,22 @@ async def api_submit_answer(
         activity_no=body.activity_no,
         answer=body.answer,
     )
+
+
+@app.get(
+    "/student/courses",
+    summary="List enrolled courses with activities for the current student",
+    tags=["Student"],
+)
+async def api_get_student_courses(
+    current_user: dict = Depends(verify_student),
+) -> list[dict]:
+    """
+    @brief Returns courses the authenticated student is enrolled in, with activity list.
+    @details Each course includes activities and the student's current progress
+             (score, completed) pulled from student_activity_progress.
+    """
+    return await getStudentCourses(email=current_user["email"])
 
 
 @app.get(

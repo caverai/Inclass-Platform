@@ -31,7 +31,7 @@ export const StudentRegisterPage: React.FC = () => {
       setIsLoading(true);
       const { token } = await authApi.studentRegister(fullName, email, password, confirmPassword);
 
-      localStorage.setItem('demo_token', token);
+      localStorage.setItem('student_token', token);
       localStorage.setItem('demo_role', 'student');
       
       const me = await authApi.getMe();
