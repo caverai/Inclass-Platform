@@ -77,7 +77,7 @@ interface MockProgress {
 const mockProgressByKey: Record<string, MockProgress> = {};
 const MOCK_TOTAL_OBJECTIVES = 2;
 
-export const getMockProgressKey = (studentEmail: string, activityId: string) =>
+const getMockProgressKey = (studentEmail: string, activityId: string) =>
   `studentProgress:${studentEmail}:${activityId}`;
 
 const createMessageId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;

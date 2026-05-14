@@ -1,142 +1,217 @@
-# Inclass-Platform
+# InClass Platform
 
-US-B setup deliverables for Team Member 2 are implemented in this repository:
+A classroom activity platform with instructor-led scoring and student participation. Instructors create and manage activities with learning objectives. Students enroll in courses, answer questions, and earn scores automatically or via manual grading.
 
-- Supabase schema SQL: `db/supabase_schema.sql`
-- Student auth verification logic: `app/services.py` (`fetch_registered_student_by_email`)
-- Student login endpoint: `POST /auth/google/student`
-- DB connectivity check endpoint: `GET /health/db`
+## Stack
 
-## 1) Create schema in Supabase
+- **Backend**: Python 3.11, FastAPI, asyncpg, PostgreSQL (Supabase)
+- **Frontend**: React 18, TypeScript, Vite, Tailwind CSS
+- **Auth**: JWT (HS256), Google OAuth 2.0, bcrypt password hashing
+- **Docs**: Doxygen
 
-1. Open Supabase project dashboard.
-2. Go to SQL Editor.
-3. Paste and run the full file from `db/supabase_schema.sql`.
-4. Confirm these tables exist: `users`, `courses`, `instructor_course_mapping`, `student_course_mapping`, `activities`.
+## Project Structure
 
-If your database was already initialized before this update, also run:
+```
+app/
+  main.py         # FastAPI app, route handlers, auth dependencies
+  services.py     # All database logic and business rules
+db/
+  supabase_schema.sql
+  migrations/
+frontend/
+  src/
+    api/          # Axios API clients (authApi, instructorApi, studentApi)
+    pages/        # Route-level React components
+    components/   # Shared UI components
+    types/        # TypeScript interfaces
+```
 
-- `db/migrations/2026-04-26_us_b_schema_patch.sql`
+## Setup
 
-## 2) Configure environment
+### 1. Database
 
-Copy `.env.example` into `.env` and set real values:
+Open Supabase SQL Editor and run:
 
-- `GOOGLE_CLIENT_ID`
-- `SCHOOL_EMAIL_DOMAIN`
-- `DATABASE_URL` (Supabase Postgres connection string)
-- `JWT_SECRET`
+```
+db/supabase_schema.sql
+```
 
-## 3) Run service locally
+If your database already existed before this version, also run:
 
-Install dependencies and run:
+```
+db/migrations/2026-04-26_us_b_schema_patch.sql
+db/migrations/2026-05-11_us_k_objective_scoring.sql
+```
+
+The second migration creates `objective_score_logs`, which is required for `POST /student/answer`. Without it, that endpoint fails.
+
+Tables: `users`, `courses`, `instructor_course_mapping`, `student_course_mapping`, `activities`, `student_activity_progress`, `objective_score_logs`, `activity_scores`.
+
+### 2. Environment
+
+Copy `.env.example` to `.env` and set:
+
+```
+GOOGLE_CLIENT_ID=<your Google OAuth client ID>
+SCHOOL_EMAIL_DOMAIN=<e.g. mef.edu.tr>
+DATABASE_URL=<Supabase Postgres connection string>
+JWT_SECRET=<random secret>
+```
+
+### 3. Run
 
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-## Frontend UI (Demo)
+Default: `http://127.0.0.1:8000/` — redirects to `/frontend/`.
 
-The repository includes a lightweight frontend at `frontend/` served by FastAPI.
-
-- Run the app with `uvicorn app.main:app --reload` (default port is 8000). Open the URL matching the host and port you used. Examples:
-	- Default: `http://127.0.0.1:8000/` (redirects to `/frontend/`)
-	- If you start on port 8010: `http://127.0.0.1:8010/`
-
-- Note: an earlier startup failure was due to DNS/DB host resolution (the server could not resolve the `DATABASE_URL` host). That is a database connection/DNS issue, not a frontend problem. Enabling IPv6 can change name-resolution behavior on some networks; if you see the previous error, ensure your machine can resolve and reach the database host in `DATABASE_URL`.
-
-- Instructor mode uses `POST /instructor/login` and Bearer token calls.
-- Student mode uses the existing grading-script compatibility flow for student endpoints.
-
-Main frontend files:
-
-- `frontend/index.html`
-- `frontend/styles.css`
-- `frontend/app.js`
-
-## Hybrid Auth / Grading Script Fallback
-
-Normal app authentication uses Google OAuth and JWT Bearer tokens.
-
-The automated grading script may call protected endpoints using raw
-email/password payloads instead of Bearer tokens. To remain compatible with
-grading scripts, `verify_student` and `verify_instructor` include a fallback
-that trusts a raw email string and checks the user role in the database.
-
-This fallback is intentionally implemented only for grading compatibility.
-
-SECURITY WARNING: In a real production application, this fallback should be
-removed or replaced with real password validation because it can allow "ghost
-login" behavior.
-
-## US-K Objective-Based Scoring
-
-`POST /student/answer` scores active activities against the activity objectives.
-Each objective can earn at most +1 point for a student. Repeating the same
-objective does not increase the score again.
-
-Successful score changes are logged in `objective_score_logs` with the student,
-course, activity, objective, score delta, total score, and metadata such as the
-submitted answer, matched words, and `grading_type: "auto"`. The `activity_scores`
-table stores the total automatic score summary when it can do so without
-overwriting manual grading.
-
-Mini-lessons are returned only when a new objective earns a point. When all
-objectives are achieved, the response celebrates completion and stops by
-returning no normal next question.
-
-Before testing `/student/answer`, manually run
-`db/migrations/2026-05-11_us_k_objective_scoring.sql` in the Supabase SQL Editor.
-Without that migration, `/student/answer` will fail because
-`objective_score_logs` will not exist.
-
-## 4) Documentation Generation
-
-This project uses Doxygen for documentation. To generate the HTML documentation:
-
-- **Windows**: Run `./doxy.ps1`
-- **Linux**: Run `./doxy.sh`
-
-The generated documentation will be available in `docs/gen/html/index.html`.
-
-## 5) Verify Definition of Done
-
-### A. Database URL is working
-
-Call:
+### 4. Frontend (dev mode)
 
 ```bash
-curl http://127.0.0.1:8000/health/db
+cd frontend
+npm install
+npm run dev
 ```
 
-Expected response:
+Proxies API calls to `http://127.0.0.1:8000` by default (see `vite.config.ts`).
+
+## Authentication
+
+Two token types are stored separately in `localStorage`:
+
+| Key                | Written by           | Used for                  |
+|--------------------|----------------------|---------------------------|
+| `instructor_token` | `POST /instructor/login` | All `/instructor/*` calls |
+| `student_token`    | `POST /student/login` or `POST /student/register` | All `/student/*` calls |
+
+Tokens are HS256 JWTs signed with `JWT_SECRET`. Payload: `sub` (user UUID), `email`, `role`, `exp` (24 h).
+
+**Grading script fallback**: `verify_student` and `verify_instructor` also accept a raw `email` value in the request body or query string with no `Authorization` header. This is intentional for automated grading script compatibility. It is a known security risk (ghost login) and should be removed in production.
+
+## API Endpoints
+
+All protected endpoints require `Authorization: Bearer <token>` unless noted.
+
+### Health
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health/db` | None | Returns `{"database": "ok"}` if the connection pool is healthy. |
+
+### Authentication
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/auth/google` | None | Google federated sign-in for any role. Body: `{"id_token": "..."}`. Returns `AuthResponse`. Email must match `SCHOOL_EMAIL_DOMAIN`. |
+| POST | `/auth/google/student` | None | Same as above but enforces `role=student`. |
+| GET | `/auth/google/student/test` | None | Serves an HTML test page for Google sign-in. |
+| GET | `/auth/me` | Bearer | Returns `{user_id, email, role}` for the token owner. |
+| POST | `/instructor/login` | None | Password-based instructor login. Body: `{"email": "...", "password": "..."}`. Returns `AuthResponse`. |
+| POST | `/student/login` | None | Password-based student login. Body: `{"email": "...", "password": "..."}`. Returns `AuthResponse`. |
+| POST | `/student/register` | None | Student self-registration. Body: `{"full_name", "email", "password", "confirm_password"}`. Email must match `SCHOOL_EMAIL_DOMAIN`. Returns `AuthResponse`. |
+| POST | `/instructor/password/set` | Instructor | Sets the initial password for an instructor account. Body: `{"password": "..."}`. |
+| POST | `/instructor/password/change` | Instructor | Changes the instructor password. Body: `{"old_password": "...", "new_password": "..."}`. |
+
+`AuthResponse` shape:
 
 ```json
-{"database":"ok"}
+{
+  "access_token": "...",
+  "token_type": "bearer",
+  "user_id": "uuid",
+  "role": "instructor | student",
+  "email": "user@school.edu",
+  "name": "Full Name"
+}
 ```
 
-### B. Student exists in users table
+### Authorization Tests
 
-Insert at least one student user in Supabase SQL editor if needed:
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/instructor/test` | Instructor | Returns `{access, email, role}` for valid instructor tokens. |
+| GET | `/student/test` | Student | Returns `{access, email, role}` for valid student tokens. |
 
-```sql
-INSERT INTO users (school_email, full_name, role)
-VALUES ('student1@mef.edu.tr', 'Student One', 'student')
-ON CONFLICT (school_email) DO NOTHING;
+### Instructor
+
+All instructor endpoints require an `instructor` role token.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/instructor/courses` | Lists all courses assigned to the authenticated instructor via `instructor_course_mapping`. |
+| GET | `/instructor/activities?course_id=<id>` | Lists all activities in the specified course. Each item includes `activity_id`, `activity_no`, `status` (`DRAFT`/`ACTIVE`/`ENDED`), `title`, `description`, and `objectives`. |
+| POST | `/instructor/activity/create` | Creates an activity. Body: `{course_id, activity_no, activity_text, objectives: [...], title?}`. Returns the created activity record. Fails `409` on duplicate `(course_id, activity_no)`. |
+| PATCH | `/instructor/activity/{course_id}/{activity_no}` | Updates activity text, objectives, or title. Body fields are all optional: `{activity_text?, objectives?, title?}`. |
+| POST | `/instructor/activity/start?course_id=<id>&activity_no=<n>` | Transitions activity from `DRAFT` → `ACTIVE`. Fails `409` if not in `DRAFT`. |
+| POST | `/instructor/activity/end?course_id=<id>&activity_no=<n>` | Transitions activity from `ACTIVE` → `ENDED`. Fails `409` if not in `ACTIVE`. |
+| POST | `/instructor/activity/reset?course_id=<id>&activity_no=<n>` | Deletes all student scores for the activity and sets status to `ENDED`. |
+| POST | `/instructor/activity/{course_id}/{activity_no}/grade/manual` | Submits a manual score for a specific student. Body: `{student_email, score, note?}`. Overwrites any existing manual grade. |
+| GET | `/instructor/activities/{activity_id}/logs` | Returns completion logs for all enrolled students. Includes students with no progress (status `Not Started`). See response shape below. |
+
+**Activity log response item**:
+
+```json
+{
+  "student_id": "uuid",
+  "student_name": "Full Name",
+  "student_email": "student@school.edu",
+  "activity_id": "uuid",
+  "activity_title": "Activity 1",
+  "course_id": "uuid",
+  "current_score": 2,
+  "max_score": 3,
+  "completed": true,
+  "completion_status": "Completed | In Progress | Not Started",
+  "last_question": "...",
+  "last_answer": "...",
+  "last_interaction_at": "2026-05-14T10:00:00Z"
+}
 ```
 
-### C. Student can authenticate and receive JWT
+Results are sorted: Completed first, then In Progress, then Not Started.
 
-Send a verified Google ID token to the student endpoint:
+### Student
+
+All student endpoints require a `student` role token.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/student/courses` | Lists all courses the student is enrolled in, with activities and current progress (score, completed) per activity. |
+| GET | `/student/activity?course_id=<id>&activity_no=<n>` | Returns content of an ACTIVE activity. Fails `403` if the activity is `DRAFT` or `ENDED`. |
+| POST | `/student/answer` | Submits an answer for objective-based automatic scoring. Body: `{course_id, activity_no, answer, email?, password?}`. Returns score delta, total score, mini-lesson (on new objective hit), completion status, and the next question. |
+
+**Scoring rules** (`POST /student/answer`): each learning objective earns at most +1 point. The service uses keyword matching against the objective text. Repeated matching of an already-scored objective adds no points. When all objectives are achieved, `completed=true` is returned and no further question is issued. Score events are logged to `objective_score_logs`.
+
+## Documentation Generation
+
+This project uses Doxygen. All Python functions have `@brief`, `@param`, `@return`, and `@throws` tags.
+
+Generate HTML docs:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/auth/google/student \
-	-H "Content-Type: application/json" \
-	-d '{"id_token":"<GOOGLE_ID_TOKEN>"}'
+# Windows
+./doxy.ps1
+
+# Linux / macOS
+./doxy.sh
 ```
 
-Expected behavior:
+Output: `docs/gen/html/index.html`
 
-- Returns `200 OK` with `access_token`, `user_id`, `role=student`, and `email`.
-- Returns `404` if the email is not a registered student in `users`.
+## Enrolling Students
+
+Students are not auto-enrolled. A row must exist in `student_course_mapping` for a student to see a course. Insert via Supabase SQL Editor:
+
+```sql
+INSERT INTO student_course_mapping (student_id, course_id)
+SELECT u.id, '<course-uuid>'
+FROM users u
+WHERE u.school_email = 'student@school.edu';
+```
+
+## Known Limitations
+
+- `/student/activities/:id` and `/student/activities/:id/chat` are called by the frontend React app but are not implemented in the backend. The backend uses composite key routes (`course_id` + `activity_no`). These frontend paths will 404 unless a migration to UUID-based routes is done.
+- The grading script fallback in `verify_student` / `verify_instructor` must be removed before any production deployment.

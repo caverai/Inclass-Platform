@@ -75,16 +75,6 @@ export const instructorApi = {
     return normalizeActivity(res.data as Record<string, unknown>);
   },
 
-  updateActivity: async (activityId: string, data: Partial<Activity>): Promise<Activity> => {
-    // We need courseId + activity_no for the PATCH endpoint.
-    // The frontend passes activityId (UUID). We resolve courseId/activity_no via
-    // a full scan only in the edit form path; for status transitions we use the
-    // dedicated start/end/reset endpoints below instead of this generic stub.
-    // This stub is kept for the ActivityFormPage edit path which provides courseId.
-    throw new Error(`updateActivity stub called for ${activityId} — use specific action methods`);
-    return data as Activity; // unreachable; satisfies TS return type
-  },
-
   updateActivityContent: async (
     courseId: string,
     activityNo: number,

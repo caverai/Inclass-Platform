@@ -36,8 +36,6 @@ from app.services import (
     createActivity,
     create_access_token,
     endActivity,
-    fetch_instructor_courses,
-    fetch_password_hash_by_email,
     fetch_registered_instructor_by_email,
     fetch_registered_student_by_email,
     fetch_user_by_email,
@@ -51,7 +49,6 @@ from app.services import (
     startActivity,
     studentLogin,
     submitAnswer,
-    update_user_password,
     updateActivity,
     submitManualGrade,
     getStudentActivity,
@@ -558,6 +555,11 @@ async def verify_instructor(
     tags=["Authorization"],
 )
 async def student_test(current_user: dict = Depends(verify_student)) -> dict:
+    """
+    @brief Verifies that the Bearer token belongs to a student.
+    @param current_user Authenticated student identity injected by verify_student.
+    @return Dictionary with keys: access, email, role.
+    """
     return {
         "access": "student",
         "email": current_user["email"],
@@ -634,6 +636,11 @@ async def api_get_student_activity(
     tags=["Authorization"],
 )
 async def instructor_test(current_user: dict = Depends(verify_instructor)) -> dict:
+    """
+    @brief Verifies that the Bearer token belongs to an instructor.
+    @param current_user Authenticated instructor identity injected by verify_instructor.
+    @return Dictionary with keys: access, email, role.
+    """
     return {
         "access": "instructor",
         "email": current_user["email"],
