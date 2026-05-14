@@ -1,13 +1,49 @@
+/**
+ * @file ActivityLogsPage.tsx
+ * @brief Instructor page that displays per-student progress logs for a single
+ *        activity and allows manual grade submission (US-L).
+ *
+ * ## Responsibilities
+ * - Fetch and display the activity-level student progress log.
+ * - Fetch and display completion events.
+ * - Resolve the integer `activityNo` required by the grade endpoint by
+ *   cross-referencing the course activity list.
+ * - Open a {@link ManualGradeModal} for any enrolled student.
+ * - Refresh the log table after a successful manual grade without a full
+ *   page reload.
+ *
+ * ## SOLID notes
+ * - **SRP** – this page orchestrates data fetching and layout.  The grade form
+ *   logic lives entirely inside {@link ManualGradeModal}.
+ * - **OCP** – new columns or actions can be added to the table without
+ *   touching the modal or the API layer.
+ * - **DIP** – depends on the `instructorApi` abstraction, not on axios directly.
+ */
+
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { instructorApi } from '../api/instructorApi';
-import type { ActivityCompletionLog, ActivityLog } from '../types';
-import { AlertCircle, ArrowLeft, User, Clock, CheckCircle2, Circle, Loader2 } from 'lucide-react';
+import type { Activity, ActivityCompletionLog, ActivityLog } from '../types';
+import {
+  AlertCircle,
+  ArrowLeft,
+  User,
+  Clock,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  PenLine,
+} from 'lucide-react';
+import { ManualGradeModal } from '../components/ManualGradeModal';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Formats an ISO timestamp for display, returning an em-dash for nulls.
+ * @param iso  ISO 8601 date string or null.
+ */
 const formatDateTime = (iso: string | null): string => {
   if (!iso) return '—';
   try {
@@ -17,12 +53,22 @@ const formatDateTime = (iso: string | null): string => {
   }
 };
 
+/**
+ * @brief Truncates a string to at most `max` characters.
+ * @param text  Source string (may be null).
+ * @param max   Maximum character count before truncation (default 80).
+ */
 const truncate = (text: string | null, max = 80): string => {
   if (!text) return '—';
   return text.length > max ? text.slice(0, max) + '…' : text;
 };
 
-const StatusBadge: React.FC<{ status: ActivityLog['completionStatus'] }> = ({ status }) => {
+/**
+ * @component LocalStatusBadge
+ * @brief Renders a colour-coded pill for student completion status.
+ * @param status  One of 'Completed' | 'In Progress' | 'Not Started'.
+ */
+const LocalStatusBadge: React.FC<{ status: ActivityLog['completionStatus'] }> = ({ status }) => {
   if (status === 'Completed') {
     return (
       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-800">
@@ -48,12 +94,47 @@ const StatusBadge: React.FC<{ status: ActivityLog['completionStatus'] }> = ({ st
 };
 
 // ---------------------------------------------------------------------------
+// Modal target shape
+// ---------------------------------------------------------------------------
+
+/**
+ * @interface GradeTarget
+ * @brief Minimal data needed to open the manual-grade modal for a student.
+ *
+ * @property studentEmail  Used as the grading key sent to the backend.
+ * @property studentName   Shown in the modal heading for instructor clarity.
+ * @property courseId      Required by the backend grade endpoint.
+ * @property activityNo    Resolved integer activity number required by the
+ *                         backend grade endpoint.
+ */
+interface GradeTarget {
+  studentEmail: string;
+  studentName: string;
+  courseId: string;
+  activityNo: number;
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
+/**
+ * @component ActivityLogsPage
+ * @brief Full-page view of student progress for a given activity, with manual
+ *        grade capability.
+ *
+ * Route parameter: `:activityId` (UUID stored in the URL).
+ *
+ * Because the backend logs endpoint returns only the UUID `activity_id` (not
+ * the integer `activity_no` needed by the grade endpoint), this page performs
+ * a second fetch — `getCourseActivities` — after the logs arrive to resolve
+ * the correct integer.  The resolved value is stored in `activityMeta` and
+ * used when opening the modal.
+ */
 export const ActivityLogsPage: React.FC = () => {
   const { activityId } = useParams<{ activityId: string }>();
   const navigate = useNavigate();
+
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [completionLogs, setCompletionLogs] = useState<ActivityCompletionLog[]>([]);
   const [activityTitle, setActivityTitle] = useState('');
@@ -61,52 +142,133 @@ export const ActivityLogsPage: React.FC = () => {
   const [error, setError] = useState('');
   const [completionError, setCompletionError] = useState('');
 
-  useEffect(() => {
-    const fetchLogs = async () => {
-      if (!activityId) return;
-      setIsLoading(true);
-      setError('');
-      setCompletionError('');
+  /**
+   * Resolved activity metadata needed by the grade endpoint.
+   * Populated after the first successful log fetch by cross-referencing the
+   * course activity list.
+   */
+  const [activityMeta, setActivityMeta] = useState<Pick<Activity, 'courseId' | 'activityNumber'> | null>(null);
 
-      const [activityResult, completionResult] = await Promise.allSettled([
-        instructorApi.getActivityLogs(activityId),
-        instructorApi.getActivityCompletionLogs(activityId),
-      ]);
+  /** The student whose grade modal is currently open, or null if closed. */
+  const [gradeTarget, setGradeTarget] = useState<GradeTarget | null>(null);
 
-      if (activityResult.status === 'fulfilled') {
-        setLogs(activityResult.value);
-        if (activityResult.value.length > 0) {
-          setActivityTitle(activityResult.value[0].activityTitle);
+  // ---------------------------------------------------------------------------
+  // Data fetching
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @brief Fetches student logs and completion events in parallel, then
+   *        resolves the integer activityNo by fetching course activities.
+   *
+   * Stores `activityMeta` ({courseId, activityNumber}) so the modal always
+   * receives the correct values regardless of which student row is clicked.
+   */
+  const fetchData = async () => {
+    if (!activityId) return;
+    setIsLoading(true);
+    setError('');
+    setCompletionError('');
+
+    const [activityResult, completionResult] = await Promise.allSettled([
+      instructorApi.getActivityLogs(activityId),
+      instructorApi.getActivityCompletionLogs(activityId),
+    ]);
+
+    let resolvedCourseId = '';
+
+    if (activityResult.status === 'fulfilled') {
+      const fetchedLogs = activityResult.value;
+      setLogs(fetchedLogs);
+      if (fetchedLogs.length > 0) {
+        setActivityTitle(fetchedLogs[0].activityTitle);
+        resolvedCourseId = fetchedLogs[0].courseId;
+      }
+    } else {
+      setError(
+        activityResult.reason instanceof Error
+          ? activityResult.reason.message
+          : 'Failed to fetch activity logs.',
+      );
+      setLogs([]);
+    }
+
+    if (completionResult.status === 'fulfilled') {
+      setCompletionLogs(completionResult.value);
+    } else {
+      setCompletionError(
+        completionResult.reason instanceof Error
+          ? completionResult.reason.message
+          : 'Failed to fetch completion logs.',
+      );
+      setCompletionLogs([]);
+    }
+
+    // Resolve the integer activityNo by matching the UUID against the course
+    // activity list.  This is required because the grade endpoint uses the
+    // sequential activity_no, not the UUID.
+    if (resolvedCourseId) {
+      try {
+        const activities = await instructorApi.getCourseActivities(resolvedCourseId);
+        const matched = activities.find((a) => a.id === activityId);
+        if (matched) {
+          setActivityMeta({ courseId: matched.courseId, activityNumber: matched.activityNumber });
         }
-      } else {
-        setError(
-          activityResult.reason instanceof Error
-            ? activityResult.reason.message
-            : 'Failed to fetch activity logs.',
-        );
-        setLogs([]);
+      } catch {
+        // Non-fatal: Grade buttons will be disabled if meta is unavailable.
       }
+    }
 
-      if (completionResult.status === 'fulfilled') {
-        setCompletionLogs(completionResult.value);
-      } else {
-        setCompletionError(
-          completionResult.reason instanceof Error
-            ? completionResult.reason.message
-            : 'Failed to fetch completion logs.',
-        );
-        setCompletionLogs([]);
-      }
+    setIsLoading(false);
+  };
 
-      setIsLoading(false);
-    };
-    fetchLogs();
+  useEffect(() => {
+    void fetchData();
   }, [activityId]);
 
-  // Summary counts
-  const completedCount  = logs.filter(l => l.completionStatus === 'Completed').length;
-  const inProgressCount = logs.filter(l => l.completionStatus === 'In Progress').length;
-  const notStartedCount = logs.filter(l => l.completionStatus === 'Not Started').length;
+  // ---------------------------------------------------------------------------
+  // Modal handlers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @brief Opens the manual-grade modal for a given student row.
+   *
+   * Disabled (button is hidden) when `activityMeta` is not yet resolved,
+   * preventing the modal from opening with incorrect endpoint parameters.
+   *
+   * @param log  ActivityLog record for the student to grade.
+   */
+  const openGradeModal = (log: ActivityLog) => {
+    if (!activityMeta) return;
+    setGradeTarget({
+      studentEmail: log.studentEmail,
+      studentName: log.studentName,
+      courseId: activityMeta.courseId,
+      activityNo: activityMeta.activityNumber,
+    });
+  };
+
+  /**
+   * @brief Handles successful grade submission: closes modal and refreshes logs.
+   */
+  const handleGradeSuccess = () => {
+    setGradeTarget(null);
+    void fetchData();
+  };
+
+  // ---------------------------------------------------------------------------
+  // Derived values
+  // ---------------------------------------------------------------------------
+
+  const completedCount  = logs.filter((l) => l.completionStatus === 'Completed').length;
+  const inProgressCount = logs.filter((l) => l.completionStatus === 'In Progress').length;
+  const notStartedCount = logs.filter((l) => l.completionStatus === 'Not Started').length;
+
+  // Grade button is enabled only when the integer activityNo has been resolved.
+  const canGrade = activityMeta !== null;
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
 
   if (isLoading) {
     return <div className="text-center py-10 text-gray-500">Loading logs…</div>;
@@ -140,6 +302,7 @@ export const ActivityLogsPage: React.FC = () => {
         </div>
       ) : (
         <>
+          {/* Completion events panel */}
           <div className="bg-white shadow-sm rounded-lg border border-gray-200 p-5 mb-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-3">Completion Events</h2>
             {completionError ? (
@@ -185,6 +348,7 @@ export const ActivityLogsPage: React.FC = () => {
             </div>
           )}
 
+          {/* Student progress table */}
           <div className="bg-white shadow overflow-hidden sm:rounded-lg">
             {logs.length === 0 ? (
               <div className="text-center py-12 text-gray-500">
@@ -210,6 +374,9 @@ export const ActivityLogsPage: React.FC = () => {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Last Answer
                       </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Actions
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
@@ -233,13 +400,15 @@ export const ActivityLogsPage: React.FC = () => {
 
                         {/* Score */}
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`text-sm font-semibold ${
-                            log.completionStatus === 'Completed'
-                              ? 'text-green-700'
-                              : log.completionStatus === 'In Progress'
-                              ? 'text-yellow-700'
-                              : 'text-gray-400'
-                          }`}>
+                          <span
+                            className={`text-sm font-semibold ${
+                              log.completionStatus === 'Completed'
+                                ? 'text-green-700'
+                                : log.completionStatus === 'In Progress'
+                                ? 'text-yellow-700'
+                                : 'text-gray-400'
+                            }`}
+                          >
                             {log.completionStatus === 'Not Started'
                               ? '—'
                               : `${log.currentScore} / ${log.maxScore}`}
@@ -248,7 +417,7 @@ export const ActivityLogsPage: React.FC = () => {
 
                         {/* Status badge */}
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <StatusBadge status={log.completionStatus} />
+                          <LocalStatusBadge status={log.completionStatus} />
                         </td>
 
                         {/* Last interaction */}
@@ -269,6 +438,21 @@ export const ActivityLogsPage: React.FC = () => {
                             {truncate(log.lastAnswer)}
                           </span>
                         </td>
+
+                        {/* Manual grade action — hidden until activityMeta is resolved */}
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {canGrade && (
+                            <button
+                              type="button"
+                              onClick={() => openGradeModal(log)}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
+                              title={`Manually grade ${log.studentName}`}
+                            >
+                              <PenLine className="h-3.5 w-3.5" />
+                              Grade
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -277,6 +461,19 @@ export const ActivityLogsPage: React.FC = () => {
             )}
           </div>
         </>
+      )}
+
+      {/* Manual grade modal — rendered outside the table for clean z-index stacking */}
+      {gradeTarget && (
+        <ManualGradeModal
+          isOpen
+          studentEmail={gradeTarget.studentEmail}
+          studentName={gradeTarget.studentName}
+          courseId={gradeTarget.courseId}
+          activityNo={gradeTarget.activityNo}
+          onSuccess={handleGradeSuccess}
+          onCancel={() => setGradeTarget(null)}
+        />
       )}
     </div>
   );

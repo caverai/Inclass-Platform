@@ -9,6 +9,7 @@ import { InstructorDashboard } from './pages/InstructorDashboard';
 import { InstructorCoursePage } from './pages/InstructorCoursePage';
 import { ActivityFormPage } from './pages/ActivityFormPage';
 import { ActivityLogsPage } from './pages/ActivityLogsPage';
+import { CourseStudentsPage } from './pages/CourseStudentsPage';
 import { StudentDashboard } from './pages/StudentDashboard';
 import { StudentActivityPage } from './pages/StudentActivityPage';
 
@@ -30,6 +31,7 @@ function App() {
             <Route path="/instructor/courses/:courseId/activities/new" element={<ActivityFormPage />} />
             <Route path="/instructor/activities/:activityId/edit" element={<ActivityFormPage />} />
             <Route path="/instructor/activities/:activityId/logs" element={<ActivityLogsPage />} />
+            <Route path="/instructor/courses/:courseId/students" element={<CourseStudentsPage />} />
           </Route>
 
           <Route element={<StudentRoute />}>

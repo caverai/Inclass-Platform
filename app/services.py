@@ -2112,3 +2112,304 @@ async def getStudentCourses(email: str) -> list[dict]:
         )
 
     return courses
+
+
+# ---------------------------------------------------------------------------
+# Student Enrollment
+# ---------------------------------------------------------------------------
+
+async def enrollStudents(
+    instructor_email: str,
+    course_id: str,
+    student_emails: list[str],
+) -> dict:
+    """
+    @brief Enrolls one or more students into a course by their school emails.
+    @details Verifies instructor authorization, looks up each student, and
+             inserts into student_course_mapping. Duplicate enrollments are
+             silently ignored (ON CONFLICT DO NOTHING). Students not found in
+             the users table are reported in the 'not_found' list.
+
+    @param instructor_email  Email of the authenticated instructor.
+    @param course_id         UUID of the course (as string).
+    @param student_emails    List of school email addresses to enroll.
+
+    @return dict with keys: enrolled (list of emails enrolled),
+            already_enrolled (list already in the course),
+            not_found (list with no matching student account).
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 404 If course does not exist.
+    """
+    pool = db_pool
+    instructor = await fetch_registered_instructor_by_email(pool, instructor_email)
+    instructor_id = str(instructor["id"])
+
+    # Verify instructor owns the course
+    async with pool.acquire() as conn:
+        mapping = await conn.fetchrow(
+            "SELECT 1 FROM instructor_course_mapping WHERE instructor_id::text = $1 AND course_id::text = $2",
+            instructor_id,
+            course_id,
+        )
+        if mapping is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not assigned to this course.",
+            )
+
+    enrolled: list[str] = []
+    already_enrolled: list[str] = []
+    not_found: list[str] = []
+
+    for email in student_emails:
+        email = email.strip().lower()
+        if not email:
+            continue
+
+        async with pool.acquire() as conn:
+            student_row = await conn.fetchrow(
+                "SELECT id FROM users WHERE school_email = $1 AND role = 'student' LIMIT 1",
+                email,
+            )
+            if student_row is None:
+                not_found.append(email)
+                continue
+
+            student_id = str(student_row["id"])
+
+            # Check if already enrolled
+            existing = await conn.fetchrow(
+                "SELECT 1 FROM student_course_mapping WHERE student_id::text = $1 AND course_id::text = $2",
+                student_id,
+                course_id,
+            )
+            if existing is not None:
+                already_enrolled.append(email)
+                continue
+
+            await conn.execute(
+                "INSERT INTO student_course_mapping (student_id, course_id) VALUES ($1, $2)",
+                student_id,
+                course_id,
+            )
+            enrolled.append(email)
+
+    logger.info(
+        "Enrollment: course=%s enrolled=%d already=%d not_found=%d",
+        course_id, len(enrolled), len(already_enrolled), len(not_found),
+    )
+
+    return {
+        "enrolled": enrolled,
+        "already_enrolled": already_enrolled,
+        "not_found": not_found,
+    }
+
+
+async def getEnrolledStudents(
+    instructor_email: str,
+    course_id: str,
+) -> list[dict]:
+    """
+    @brief Returns the list of students enrolled in a course.
+    @param instructor_email  Email of the authenticated instructor.
+    @param course_id         UUID of the course (as string).
+    @return List of dicts with keys: student_id, email, full_name, enrolled_at.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    """
+    pool = db_pool
+    instructor = await fetch_registered_instructor_by_email(pool, instructor_email)
+    instructor_id = str(instructor["id"])
+
+    async with pool.acquire() as conn:
+        mapping = await conn.fetchrow(
+            "SELECT 1 FROM instructor_course_mapping WHERE instructor_id::text = $1 AND course_id::text = $2",
+            instructor_id,
+            course_id,
+        )
+        if mapping is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not assigned to this course.",
+            )
+
+        rows = await conn.fetch(
+            """
+            SELECT u.id, u.school_email, u.full_name, scm.created_at AS enrolled_at
+            FROM   student_course_mapping scm
+            JOIN   users u ON u.id = scm.student_id
+            WHERE  scm.course_id::text = $1
+            ORDER  BY u.full_name ASC, u.school_email ASC
+            """,
+            course_id,
+        )
+
+    return [
+        {
+            "student_id": str(r["id"]),
+            "email": r["school_email"],
+            "full_name": r["full_name"] or "",
+            "enrolled_at": r["enrolled_at"].isoformat() if r["enrolled_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+async def unenrollStudent(
+    instructor_email: str,
+    course_id: str,
+    student_email: str,
+) -> dict:
+    """
+    @brief Removes a student from a course.
+    @param instructor_email  Email of the authenticated instructor.
+    @param course_id         UUID of the course (as string).
+    @param student_email     Email of the student to unenroll.
+    @return dict with key: message.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 404 If student not found or not enrolled.
+    """
+    pool = db_pool
+    instructor = await fetch_registered_instructor_by_email(pool, instructor_email)
+    instructor_id = str(instructor["id"])
+
+    async with pool.acquire() as conn:
+        mapping = await conn.fetchrow(
+            "SELECT 1 FROM instructor_course_mapping WHERE instructor_id::text = $1 AND course_id::text = $2",
+            instructor_id,
+            course_id,
+        )
+        if mapping is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not assigned to this course.",
+            )
+
+        student_row = await conn.fetchrow(
+            "SELECT id FROM users WHERE school_email = $1 AND role = 'student' LIMIT 1",
+            student_email.strip().lower(),
+        )
+        if student_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No student account found for '{student_email}'.",
+            )
+
+        result = await conn.execute(
+            "DELETE FROM student_course_mapping WHERE student_id = $1 AND course_id::text = $2",
+            student_row["id"],
+            course_id,
+        )
+
+    if result == "DELETE 0":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Student is not enrolled in this course.",
+        )
+
+    logger.info("Unenrolled student=%s from course=%s", student_email, course_id)
+    return {"message": f"Student '{student_email}' has been removed from the course."}
+
+
+# ---------------------------------------------------------------------------
+# Course & Activity Deletion
+# ---------------------------------------------------------------------------
+
+async def deleteCourse(
+    instructor_email: str,
+    course_id: str,
+) -> dict:
+    """
+    @brief Deletes a course and all associated data (cascade).
+    @details Verifies the instructor is assigned to the course before deletion.
+             The database schema uses CASCADE on all FKs, so activities,
+             mappings, and progress records are deleted automatically.
+
+    @param instructor_email  Email of the authenticated instructor.
+    @param course_id         UUID of the course to delete (as string).
+    @return dict with key: message.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 404 If course is not found.
+    """
+    pool = db_pool
+    instructor = await fetch_registered_instructor_by_email(pool, instructor_email)
+    instructor_id = str(instructor["id"])
+
+    async with pool.acquire() as conn:
+        mapping = await conn.fetchrow(
+            "SELECT 1 FROM instructor_course_mapping WHERE instructor_id::text = $1 AND course_id::text = $2",
+            instructor_id,
+            course_id,
+        )
+        if mapping is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not assigned to this course.",
+            )
+
+        result = await conn.execute(
+            "DELETE FROM courses WHERE id::text = $1",
+            course_id,
+        )
+
+    if result == "DELETE 0":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Course not found.",
+        )
+
+    logger.info("Course deleted: id=%s by instructor=%s", course_id, instructor_email)
+    return {"message": "Course deleted successfully."}
+
+
+async def deleteActivity(
+    instructor_email: str,
+    course_id: str,
+    activity_no: int,
+) -> dict:
+    """
+    @brief Deletes an activity and all associated student progress data (cascade).
+    @details Verifies instructor authorization before deletion. The database CASCADE
+             rules handle student_activity_progress, activity_scores, and
+             objective_score_logs automatically.
+
+    @param instructor_email  Email of the authenticated instructor.
+    @param course_id         UUID of the course (as string).
+    @param activity_no       Activity number within the course.
+    @return dict with key: message.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 404 If activity is not found.
+    """
+    pool = db_pool
+    instructor = await fetch_registered_instructor_by_email(pool, instructor_email)
+    instructor_id = str(instructor["id"])
+
+    async with pool.acquire() as conn:
+        mapping = await conn.fetchrow(
+            "SELECT 1 FROM instructor_course_mapping WHERE instructor_id::text = $1 AND course_id::text = $2",
+            instructor_id,
+            course_id,
+        )
+        if mapping is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not assigned to this course.",
+            )
+
+        result = await conn.execute(
+            "DELETE FROM activities WHERE course_id::text = $1 AND activity_no = $2",
+            course_id,
+            activity_no,
+        )
+
+    if result == "DELETE 0":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Activity #{activity_no} not found in this course.",
+        )
+
+    logger.info(
+        "Activity deleted: course=%s activity_no=%d by instructor=%s",
+        course_id, activity_no, instructor_email,
+    )
+    return {"message": f"Activity #{activity_no} deleted successfully."}

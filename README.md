@@ -13,17 +13,38 @@ A classroom activity platform with instructor-led scoring and student participat
 
 ```
 app/
-  main.py         # FastAPI app, route handlers, auth dependencies
-  services.py     # All database logic and business rules
+  main.py              # FastAPI app, route handlers, auth dependencies
+  services.py          # All database logic and business rules
 db/
   supabase_schema.sql
   migrations/
 frontend/
   src/
-    api/          # Axios API clients (authApi, instructorApi, studentApi)
-    pages/        # Route-level React components
-    components/   # Shared UI components
-    types/        # TypeScript interfaces
+    api/
+      authApi.ts       # Auth endpoints (Google sign-in, /auth/me)
+      instructorApi.ts # Instructor CRUD + manual grade submission
+      studentApi.ts    # Student course/activity/chat endpoints + mock fallback
+      client.ts        # Axios instance with auth header injection
+    pages/
+      LoginPage.tsx          # Instructor Google sign-in
+      StudentLoginPage.tsx   # Student Google sign-in
+      StudentRegisterPage.tsx
+      InstructorDashboard.tsx
+      InstructorCoursePage.tsx  # Activity list with start / end / reset actions
+      ActivityFormPage.tsx      # Create / edit activity form
+      ActivityLogsPage.tsx      # Student progress table + manual grade modal
+      StudentDashboard.tsx
+      StudentActivityPage.tsx   # Tutoring chat with live score display
+    components/
+      ManualGradeModal.tsx  # Self-contained modal for instructor manual grading (US-L)
+      ChatMessage.tsx        # Renders tutor / student chat bubbles and mini-lessons
+      ConfirmModal.tsx       # Generic confirmation dialog
+      GoogleSignInButton.tsx
+      Layout.tsx
+      ProtectedRoute.tsx
+      StatusBadge.tsx
+    types/
+      index.ts          # Shared TypeScript interfaces (includes ManualGradeRequest/Result)
 ```
 
 ## Setup
@@ -147,8 +168,9 @@ All instructor endpoints require an `instructor` role token.
 | POST | `/instructor/activity/start?course_id=<id>&activity_no=<n>` | Transitions activity from `DRAFT` → `ACTIVE`. Fails `409` if not in `DRAFT`. |
 | POST | `/instructor/activity/end?course_id=<id>&activity_no=<n>` | Transitions activity from `ACTIVE` → `ENDED`. Fails `409` if not in `ACTIVE`. |
 | POST | `/instructor/activity/reset?course_id=<id>&activity_no=<n>` | Deletes all student scores for the activity and sets status to `ENDED`. |
-| POST | `/instructor/activity/{course_id}/{activity_no}/grade/manual` | Submits a manual score for a specific student. Body: `{student_email, score, note?}`. Overwrites any existing manual grade. |
+| POST | `/instructor/activity/{course_id}/{activity_no}/grade/manual` | Submits a manual score for a specific student. Body: `{student_email, score, note?}`. Overwrites any existing manual grade. Logged as a manual grading event. Frontend: **Grade** button in `ActivityLogsPage` opens `ManualGradeModal`. |
 | GET | `/instructor/activities/{activity_id}/logs` | Returns completion logs for all enrolled students. Includes students with no progress (status `Not Started`). See response shape below. |
+| GET | `/instructor/activities/{activity_id}/completion-logs` | Returns a list of students who completed the activity, with timestamps. |
 
 **Activity log response item**:
 
@@ -211,7 +233,32 @@ FROM users u
 WHERE u.school_email = 'student@school.edu';
 ```
 
+## Frontend Pages Quick Reference
+
+| Page | Route | Role |
+|------|-------|------|
+| Instructor login | `/instructor/login` | Instructor |
+| Instructor dashboard (course list) | `/instructor/dashboard` | Instructor |
+| Course activity list | `/instructor/courses/:courseId` | Instructor |
+| Create activity | `/instructor/courses/:courseId/activities/new` | Instructor |
+| Edit activity | `/instructor/activities/:activityId/edit` | Instructor |
+| Activity logs + manual grade | `/instructor/activities/:activityId/logs` | Instructor |
+| Student login | `/student/login` | Student |
+| Student register | `/student/register` | Student |
+| Student dashboard (course + activity list) | `/student/dashboard` | Student |
+| Tutoring chat | `/student/activities/:activityId` | Student |
+
+## Manual Grading Flow (US-L)
+
+1. Instructor navigates to an activity's log page (`/instructor/activities/:activityId/logs`).
+2. Each enrolled student row shows a **Grade** button (visible once `activityNo` is resolved).
+3. Clicking **Grade** opens `ManualGradeModal` with the student's name pre-filled.
+4. Instructor enters a numeric score and an optional note, then clicks **Submit Grade**.
+5. The frontend calls `POST /instructor/activity/{courseId}/{activityNo}/grade/manual`.
+6. On success, the modal closes and the log table refreshes automatically.
+
 ## Known Limitations
 
 - `/student/activities/:id` and `/student/activities/:id/chat` are supported for UUID-based activity access in addition to the composite key routes.
 - The grading script fallback in `verify_student` / `verify_instructor` must be removed before any production deployment.
+- `ActivityLogsPage` resolves `activityNo` via a secondary `getCourseActivities` call because the logs endpoint does not return the integer `activity_no` directly. This is an extra round-trip and can be eliminated if the backend is updated to include `activity_no` in the log response.

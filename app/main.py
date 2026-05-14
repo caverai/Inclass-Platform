@@ -34,6 +34,7 @@ from app.services import (
     JWT_SECRET,
     changeInstructorPassword,
     createActivity,
+    createCourse,
     create_access_token,
     endActivity,
     fetch_registered_instructor_by_email,
@@ -57,6 +58,11 @@ from app.services import (
     getActivityCompletionLogs,
     getStudentActivityById,
     submitAnswerByActivityId,
+    enrollStudents,
+    getEnrolledStudents,
+    unenrollStudent,
+    deleteCourse,
+    deleteActivity,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -719,6 +725,57 @@ async def get_instructor_courses(
     return await listMyCourses(email=current_user["email"], password=password)
 
 
+class CreateCourseRequest(BaseModel):
+    """
+    @brief Request model for creating a new course (instructor).
+
+    @property course_code  Short unique identifier (e.g. "CS101").
+    @property course_name  Full human-readable course name.
+    @property term         Optional academic term label (e.g. "2026 Spring").
+    """
+
+    course_code: str
+    course_name: str
+    term: Optional[str] = None
+
+
+@app.post(
+    "/instructor/courses",
+    summary="Create a new course",
+    tags=["Instructor"],
+    status_code=201,
+)
+async def api_create_course(
+    body: CreateCourseRequest,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Creates a new course and assigns the authenticated instructor to it.
+
+    @details Delegates to `createCourse` which wraps both the INSERT into
+             `courses` and the INSERT into `instructor_course_mapping` inside
+             a single transaction.
+
+    @param body          Validated request body: course_code, course_name, term.
+    @param current_user  Authenticated instructor identity from the JWT dependency.
+
+    @return dict with the created course fields: id, course_code, course_name,
+            term, created_at.
+
+    @throws HTTPException 409 If a course with the given course_code already exists.
+    """
+    instructor = await fetch_registered_instructor_by_email(
+        app.state.db_pool, current_user["email"]
+    )
+    return await createCourse(
+        pool=app.state.db_pool,
+        instructor_id=str(instructor["id"]),
+        course_code=body.course_code,
+        course_name=body.course_name,
+        term=body.term,
+    )
+
+
 @app.post(
     "/instructor/login",
     response_model=AuthResponse,
@@ -1242,6 +1299,127 @@ async def api_submit_manual_grade(
         score=body.score,
         note=body.note
     )
+
+# ---------------------------------------------------------------------------
+# Student Enrollment Endpoints
+# ---------------------------------------------------------------------------
+
+class EnrollStudentsRequest(BaseModel):
+    """Request model for bulk student enrollment."""
+    student_emails: list[str]
+
+
+class UnenrollStudentRequest(BaseModel):
+    """Request model for removing a student from a course."""
+    student_email: str
+
+
+@app.post(
+    "/instructor/courses/{course_id}/enroll",
+    summary="Enroll students into a course",
+    tags=["Instructor"],
+    status_code=200,
+)
+async def api_enroll_students(
+    course_id: str,
+    body: EnrollStudentsRequest,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Enrolls one or more students into a course by their school emails.
+    @details Instructor must be assigned to the course. Duplicate enrollments
+             are silently ignored. Students without accounts are reported.
+    @return dict with keys: enrolled, already_enrolled, not_found.
+    """
+    return await enrollStudents(
+        instructor_email=current_user["email"],
+        course_id=course_id,
+        student_emails=body.student_emails,
+    )
+
+
+@app.get(
+    "/instructor/courses/{course_id}/students",
+    summary="List enrolled students in a course",
+    tags=["Instructor"],
+)
+async def api_get_enrolled_students(
+    course_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> list[dict]:
+    """
+    @brief Returns all students enrolled in the specified course.
+    @return List of student records: student_id, email, full_name, enrolled_at.
+    """
+    return await getEnrolledStudents(
+        instructor_email=current_user["email"],
+        course_id=course_id,
+    )
+
+
+@app.delete(
+    "/instructor/courses/{course_id}/students",
+    summary="Remove a student from a course",
+    tags=["Instructor"],
+)
+async def api_unenroll_student(
+    course_id: str,
+    body: UnenrollStudentRequest,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Removes a student from a course by their school email.
+    """
+    return await unenrollStudent(
+        instructor_email=current_user["email"],
+        course_id=course_id,
+        student_email=body.student_email,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Course & Activity Deletion Endpoints
+# ---------------------------------------------------------------------------
+
+@app.delete(
+    "/instructor/courses/{course_id}",
+    summary="Delete a course",
+    tags=["Instructor"],
+)
+async def api_delete_course(
+    course_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Deletes a course and all associated data.
+    @details Instructor must own the course. DB cascade handles child records.
+    """
+    return await deleteCourse(
+        instructor_email=current_user["email"],
+        course_id=course_id,
+    )
+
+
+@app.delete(
+    "/instructor/activity/{course_id}/{activity_no}",
+    summary="Delete an activity",
+    tags=["Instructor"],
+)
+async def api_delete_activity(
+    course_id: str,
+    activity_no: int,
+    current_user: dict = Depends(verify_instructor),
+) -> dict:
+    """
+    @brief Deletes an activity and all associated student data (cascade).
+    @details Instructor must be assigned to the course owning the activity.
+    """
+    return await deleteActivity(
+        instructor_email=current_user["email"],
+        course_id=course_id,
+        activity_no=activity_no,
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
