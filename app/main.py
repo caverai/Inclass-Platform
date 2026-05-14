@@ -187,12 +187,14 @@ class CreateActivityRequest(BaseModel):
     activity_text: str
     objectives: list[str]
     title: Optional[str] = None
+    max_score: Optional[int] = None
 
 class UpdateActivityRequest(BaseModel):
     """Request model for updating an existing course activity (US-G)."""
     activity_text: Optional[str] = None
     objectives: Optional[list[str]] = None
     title: Optional[str] = None
+    max_score: Optional[int] = None
 
 class ManualGradeRequest(BaseModel):
     """Request model for submitting a manual grade (US-L)."""
@@ -984,6 +986,7 @@ async def api_create_activity(
         activity_text=body.activity_text,
         objectives=body.objectives,
         title=body.title,
+        max_score=body.max_score,
     )
 
 
@@ -1269,7 +1272,8 @@ async def api_update_activity(
         activity_no=activity_no,
         activity_text=body.activity_text,
         objectives=body.objectives,
-        title=body.title
+        title=body.title,
+        max_score=body.max_score
     )
 
 @app.post(

@@ -25,28 +25,47 @@ JWT_SECRET: str = os.environ.get("JWT_SECRET", "")
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 logger = logging.getLogger("inclass.auth")
 
-async def call_openrouter(system_prompt: str, user_prompt: str) -> dict:
-    url = "https://openrouter.ai/api/v1/chat/completions"
+async def call_deepseek_api(system_prompt: str, user_prompt: str) -> dict:
+    """
+    @brief Calls the official DeepSeek API (deepseek-chat) with minimal tokens.
+    """
+    url = "https://api.deepseek.com/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek/deepseek-v4-flash:free",
+        "model": "deepseek-chat",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "response_format": {"type": "json_object"}
+        "response_format": {"type": "json_object"},
+        "max_tokens": 150,
+        "temperature": 0.3
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
-        res = await client.post(url, headers=headers, json=payload)
-        res.raise_for_status()
-        text = res.json()["choices"][0]["message"]["content"]
+        try:
+            res = await client.post(url, headers=headers, json=payload)
+            res.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning("DeepSeek API rate limit exceeded (429). Falling back to basic logic.")
+                return {}
+            raise
+        except Exception as e:
+            logger.warning(f"DeepSeek API error: {e}")
+            return {}
+            
+        data = res.json()
+        if "choices" not in data or not data["choices"]:
+            return {}
+            
+        text = data["choices"][0]["message"]["content"]
         # sometimes LLMs wrap json in ```json ... ```
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -718,8 +737,8 @@ async def _find_new_objective_achievement(
         return None
         
     system_prompt = (
-        "You are an expert strict teacher. Given an Activity, a Student Answer, and a list of unearned Objectives, "
-        "determine if the student answer newly satisfies exactly ONE of the objectives. "
+        "You are a supportive teacher. Given an Activity, a Student Answer, and a list of unearned Objectives, "
+        "determine if the student answer newly satisfies any of the objectives. "
         "Output ONLY valid JSON with no markdown formatting. The format MUST be: "
         "{\"achieved_index\": <integer or null>, \"matched_words\": [\"word1\", \"word2\"]}. "
         "If none are satisfied, return {\"achieved_index\": null, \"matched_words\": []}. "
@@ -729,7 +748,7 @@ async def _find_new_objective_achievement(
     objectives_str = "\\n".join(f"{i}: {objectives[i]}" for i in unearned_indexes)
     user_prompt = f"Activity: {activity_text}\\n\\nObjectives:\\n{objectives_str}\\n\\nStudent Answer: {answer}"
     
-    res = await call_openrouter(system_prompt, user_prompt)
+    res = await call_deepseek_api(system_prompt, user_prompt)
     achieved = res.get("achieved_index")
     
     if achieved is not None and achieved in unearned_indexes:
@@ -772,7 +791,7 @@ async def _next_objective_question(objective_text: str, activity_text: str = "",
     
     user_prompt = f"Activity: {activity_text}\\n\\nTarget Objective: {objective_text}\\n\\nPrevious Student Answer: {previous_answer}"
     
-    res = await call_openrouter(system_prompt, user_prompt)
+    res = await call_deepseek_api(system_prompt, user_prompt)
     question = res.get("question")
     
     if question:
@@ -852,6 +871,7 @@ async def create_activity(
     activity_text: str,
     objectives: list[str],
     title: Optional[str] = None,
+    max_score: Optional[int] = None,
 ) -> dict:
     """
     @brief Creates a new activity for an authorized instructor (US-F).
@@ -883,6 +903,7 @@ async def create_activity(
         )
 
     clean_objectives = _normalize_objectives(objectives)
+    final_max_score = max_score if max_score is not None else len(clean_objectives)
     final_title = _build_activity_title(clean_text, title)
 
     query = """
@@ -910,7 +931,7 @@ async def create_activity(
                 clean_text,
                 json.dumps(clean_objectives),
                 str(instructor_id),
-                len(clean_objectives),
+                final_max_score,
             )
     except UniqueViolationError as exc:
         raise HTTPException(
@@ -1003,11 +1024,24 @@ async def end_activity(
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
     current_status = await _fetch_activity_status(pool, course_id, activity_no)
 
+    if current_status == "ENDED":
+        logger.info("Activity already ended: course_id=%s activity_no=%d", course_id, activity_no)
+        return {
+            "status": "success",
+            "course_id": str(course_id),
+            "activity_no": int(activity_no),
+            "activity_status": "ENDED",
+        }
+
     if current_status != "ACTIVE":
+        logger.warning(
+            "Conflict: Cannot end activity in state '%s'. course_id=%s activity_no=%d",
+            current_status, course_id, activity_no
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Invalid activity transition. "
+                f"Invalid activity transition from '{current_status}'. "
                 "Only ACTIVE activities can be ended."
             ),
         )
@@ -1069,6 +1103,7 @@ async def createActivity(
     activity_text: str,
     objectives: list[str],
     title: Optional[str] = None,
+    max_score: Optional[int] = None,
 ) -> dict:
     """
     @brief Creates an activity with US-F contract-compatible signature.
@@ -1090,6 +1125,7 @@ async def createActivity(
         activity_text=activity_text,
         objectives=objectives,
         title=title,
+        max_score=max_score,
     )
 
 
@@ -1214,6 +1250,47 @@ async def submitAnswer(
                         "Excellent work, all objectives are covered. "
                         f"Your score is {current_score}."
                     ),
+                    "completed": True,
+                    "next_question": None,
+                }
+                
+            if clean_answer == "<mark-as-completed>":
+                unearned_indexes = [i for i in range(len(objectives)) if i not in earned_indexes]
+                for idx in unearned_indexes:
+                    metadata = {"answer": clean_answer, "matched_words": [], "grading_type": "auto"}
+                    await conn.execute(
+                        """
+                        INSERT INTO objective_score_logs (
+                            student_id, course_id, activity_id, objective_index, objective_text,
+                            score_delta, total_score, metadata
+                        ) VALUES ($1, $2, $3, $4, $5, 1, $6, $7::jsonb)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        student["id"], activity["course_id"], activity["id"],
+                        idx, objectives[idx], current_score + 1, json.dumps(metadata)
+                    )
+                
+                await _upsert_student_activity_progress(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    current_score=len(objectives),
+                    completed=True,
+                    last_question=None,
+                    last_answer=clean_answer,
+                )
+                await _log_activity_action(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    action_type="COMPLETED",
+                )
+                return {
+                    "score_delta": len(unearned_indexes),
+                    "score": len(objectives),
+                    "message": "Activity marked as completed.",
                     "completed": True,
                     "next_question": None,
                 }
@@ -1553,7 +1630,8 @@ async def getActivityLogs(
             u.id::text                          AS student_id,
             u.full_name                         AS student_name,
             u.school_email                      AS student_email,
-            sap.current_score                   AS current_score,
+            sap.current_score                   AS auto_score,
+            ast.score                           AS manual_score,
             sap.completed                       AS completed,
             sap.last_question                   AS last_question,
             sap.last_answer                     AS last_answer,
@@ -1565,6 +1643,9 @@ async def getActivityLogs(
         LEFT   JOIN student_activity_progress sap
                ON  sap.student_id = u.id
                AND sap.activity_id = $1
+        LEFT   JOIN activity_scores ast
+               ON  ast.student_id = u.id
+               AND ast.activity_id = $1
         WHERE  scm.course_id = $2
         ORDER  BY u.full_name ASC
         """,
@@ -1574,9 +1655,14 @@ async def getActivityLogs(
 
     logs: list[dict] = []
     for row in rows:
-        has_progress = row["current_score"] is not None
-        current_score = int(row["current_score"]) if has_progress else 0
-        completed = bool(row["completed"]) if has_progress else False
+        has_progress = row["auto_score"] is not None or row["manual_score"] is not None
+        current_score = float(row["manual_score"]) if row["manual_score"] is not None else (float(row["auto_score"]) if row["auto_score"] is not None else 0.0)
+        
+        # Ensure we don't display a score higher than max_score in the logs
+        if current_score > max_score:
+            current_score = float(max_score)
+            
+        completed = bool(row["completed"]) if row["completed"] is not None else False
 
         if completed:
             completion_status = "Completed"
@@ -1697,7 +1783,8 @@ async def updateActivity(
     activity_no: int, 
     activity_text: str | None = None, 
     objectives: list[str] | None = None, 
-    title: str | None = None
+    title: str | None = None,
+    max_score: int | None = None
 ) -> dict:
     """
     @brief Updates one or more editable fields of an existing activity.
@@ -1726,7 +1813,7 @@ async def updateActivity(
 
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
 
-    if activity_text is None and objectives is None and title is None:
+    if activity_text is None and objectives is None and title is None and max_score is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Empty patch: At least one allowed field must be provided."
@@ -1746,8 +1833,15 @@ async def updateActivity(
         updates.append(f"objectives = ${idx}::jsonb")
         values.append(json.dumps(clean_objectives))
         idx += 1
+        # Only auto-recalculate if max_score was NOT explicitly provided in this call
+        if max_score is None:
+            updates.append(f"max_score = ${idx}")
+            values.append(len(clean_objectives))
+            idx += 1
+
+    if max_score is not None:
         updates.append(f"max_score = ${idx}")
-        values.append(len(clean_objectives))
+        values.append(max_score)
         idx += 1
 
     if title is not None:
@@ -1813,7 +1907,7 @@ async def submitManualGrade(
 
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
 
-    activity_query = "SELECT id, max_score, status FROM activities WHERE course_id::text = $1 AND activity_no = $2"
+    activity_query = "SELECT id, max_score, status, objectives FROM activities WHERE course_id::text = $1 AND activity_no = $2"
     async with pool.acquire() as conn:
         activity = await conn.fetchrow(activity_query, course_id, activity_no)
 
@@ -1834,10 +1928,17 @@ async def submitManualGrade(
         if not is_enrolled:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Student is not enrolled in this course.")
 
-    if score < 0 or score > activity["max_score"]:
+    # Robust boundary check
+    db_max_score = float(activity["max_score"]) if activity["max_score"] is not None else 0.0
+    # Also check against objective count as a secondary safety if max_score is suspiciously zero or not set
+    if db_max_score <= 0:
+        objectives = _coerce_objectives_payload(activity["objectives"])
+        db_max_score = float(len(objectives))
+
+    if score < 0 or score > (db_max_score + 0.001): # Adding small epsilon for float precision
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f"Score must be between 0 and the activity maximum ({activity['max_score']})."
+            detail=f"Score {score} is invalid. It must be between 0 and the activity maximum ({db_max_score})."
         )
 
     upsert_query = """
@@ -1991,6 +2092,20 @@ async def getStudentActivity(
     )
     earned_indexes = {int(row["objective_index"]) for row in earned_rows}
     current_score = len(earned_indexes)
+    
+    manual_score_row = await pool.fetchrow(
+        "SELECT score FROM activity_scores WHERE student_id = $1 AND activity_id = $2",
+        student["id"], activity["id"]
+    )
+    if manual_score_row and manual_score_row["score"] is not None:
+        current_score = int(manual_score_row["score"])
+
+    # Fetch existing progress to preserve last_answer
+    existing_progress = await pool.fetchrow(
+        "SELECT last_answer FROM student_activity_progress WHERE student_id = $1 AND activity_id = $2",
+        student["id"], activity["id"]
+    )
+    existing_last_answer = existing_progress["last_answer"] if existing_progress else None
 
     next_unearned_index = next(
         (index for index in range(len(objectives)) if index not in earned_indexes),
@@ -2017,7 +2132,7 @@ async def getStudentActivity(
             current_score=current_score,
             completed=completed,
             last_question=next_question,
-            last_answer=None,
+            last_answer=existing_last_answer,
         )
 
     return {
@@ -2191,12 +2306,18 @@ async def getStudentCourses(email: str) -> list[dict]:
                 a.title,
                 a.description,
                 a.status,
-                sap.current_score,
+                a.objectives,
+                a.max_score AS manual_max_score,
+                sap.current_score AS auto_score,
+                ast.score AS manual_score,
                 sap.completed
             FROM   activities a
             LEFT   JOIN student_activity_progress sap
                    ON  sap.activity_id = a.id
                    AND sap.student_id  = $1
+            LEFT   JOIN activity_scores ast
+                   ON  ast.activity_id = a.id
+                   AND ast.student_id  = $1
             WHERE  a.course_id::text = $2
             ORDER  BY a.activity_no ASC
             """,
@@ -2204,18 +2325,30 @@ async def getStudentCourses(email: str) -> list[dict]:
             course_id,
         )
 
-        activities = [
-            {
+        activities = []
+        for r in activity_rows:
+            obj_list = _coerce_objectives_payload(r.get("objectives", "[]"))
+            # Prefer the explicit max_score column if present, otherwise count objectives
+            m_score = float(r["manual_max_score"]) if r.get("manual_max_score") is not None else float(len(obj_list))
+            
+            auto_s = float(r["auto_score"]) if r["auto_score"] is not None else 0.0
+            manu_s = float(r["manual_score"]) if r["manual_score"] is not None else None
+            
+            # Final score logic: prefer manual, but cap at m_score
+            display_score = manu_s if manu_s is not None else auto_s
+            if display_score > m_score:
+                display_score = m_score
+
+            activities.append({
                 "activity_id":   str(r["id"]),
                 "activity_no":   r["activity_no"],
                 "title":         r["title"],
                 "description":   r["description"],
                 "status":        r["status"],
-                "current_score": int(r["current_score"]) if r["current_score"] is not None else 0,
+                "current_score": display_score,
+                "max_score":     m_score,
                 "completed":     bool(r["completed"]) if r["completed"] is not None else False,
-            }
-            for r in activity_rows
-        ]
+            })
 
         courses.append(
             {
