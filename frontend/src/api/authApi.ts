@@ -32,6 +32,15 @@ export const authApi = {
     return { token };
   },
 
+  googleSignIn: async (role: Role, idToken: string): Promise<{ token: string }> => {
+    const endpoint = role === 'STUDENT' ? '/auth/google/student' : '/auth/google';
+    const res = await apiClient.post(endpoint, { id_token: idToken });
+    const data = res.data as Record<string, any>;
+    const token = String(data.access_token ?? '');
+    if (!token) throw new Error('No access token returned');
+    return { token };
+  },
+
   studentRegister: async (fullName: string, email: string, password: string, confirmPassword: string): Promise<{ token: string }> => {
     const res = await apiClient.post('/student/register', { 
       full_name: fullName, 
