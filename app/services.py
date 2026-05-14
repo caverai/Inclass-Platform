@@ -241,6 +241,65 @@ async def fetch_instructor_courses(pool: asyncpg.Pool, instructor_id: str) -> li
     return rows
 
 
+async def create_course(
+    pool: asyncpg.Pool,
+    instructor_id: str,
+    course_code: str,
+    course_name: str,
+    term: Optional[str] = None,
+) -> dict:
+    """
+    @brief Creates a new course and assigns the instructor to it in one transaction.
+    @param pool The asyncpg connection pool.
+    @param instructor_id UUID of the instructor creating the course.
+    @param course_code Unique identifier (e.g., "CS101").
+    @param course_name Full course title.
+    @param term Optional term label (e.g., "2026 Spring").
+    @return Dictionary of the created course.
+    @throws HTTPException 409 if course_code already exists.
+    """
+    query_course = """
+        INSERT INTO courses (course_code, course_name, term)
+        VALUES ($1, $2, $3)
+        RETURNING id, course_code, course_name, term, created_at
+    """
+    query_mapping = """
+        INSERT INTO instructor_course_mapping (instructor_id, course_id)
+        VALUES ($1, $2)
+    """
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    query_course,
+                    course_code.strip(),
+                    course_name.strip(),
+                    term.strip() if term else None,
+                )
+                await conn.execute(query_mapping, str(instructor_id), row["id"])
+                logger.info("Course created: %s (%s)", course_name, course_code)
+                return dict(row)
+    except UniqueViolationError:
+        logger.warning("Course creation failed: code %s already exists", course_code)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A course with code '{course_code}' already exists.",
+        )
+
+
+async def createCourse(
+    pool: asyncpg.Pool,
+    instructor_id: str,
+    course_code: str,
+    course_name: str,
+    term: Optional[str] = None,
+) -> dict:
+    """
+    @brief US-B: Create a new course (CamelCase alias for main.py).
+    """
+    return await create_course(pool, instructor_id, course_code, course_name, term)
+
+
 async def update_user_password(
     pool: asyncpg.Pool, user_id: str, hashed_password: str
 ) -> bool:
@@ -801,7 +860,7 @@ async def create_activity(
                 int(activity_no),
                 final_title,
                 clean_text,
-                clean_objectives,
+                json.dumps(clean_objectives),
                 str(instructor_id),
             )
     except UniqueViolationError as exc:
