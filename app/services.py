@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import asyncpg
+import httpx
 from fastapi import HTTPException, status
 from asyncpg.exceptions import UniqueViolationError
 from jose import jwt
@@ -24,7 +25,38 @@ JWT_SECRET: str = os.environ.get("JWT_SECRET", "")
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
 logger = logging.getLogger("inclass.auth")
+
+async def call_openrouter(system_prompt: str, user_prompt: str) -> dict:
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek/deepseek-v4-flash:free",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        res = await client.post(url, headers=headers, json=payload)
+        res.raise_for_status()
+        text = res.json()["choices"][0]["message"]["content"]
+        # sometimes LLMs wrap json in ```json ... ```
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            return {}
+
 
 _AUTO_SCORING_STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for",
@@ -672,29 +704,44 @@ def _objective_is_achieved(objective_words: set[str], matched_words: list[str]) 
     return len(matched_words) >= required_matches
 
 
-def _find_new_objective_achievement(
+async def _find_new_objective_achievement(
     objectives: list[str],
     answer: str,
     earned_indexes: set[int],
+    activity_text: str = "",
 ) -> tuple[int, str, list[str]] | None:
     """
-    @brief Scans objectives for the first one newly satisfied by the student answer.
-    @param objectives Full list of objective strings for the activity.
-    @param answer The student's submitted answer text.
-    @param earned_indexes Set of objective indexes already awarded a point.
-    @return Tuple of (objective_index, objective_text, matched_words) for the first
-            newly achieved objective, or None if no new objective is satisfied.
+    @brief Uses DeepSeek via OpenRouter to evaluate if the answer satisfies any unearned objective.
     """
+    unearned_indexes = [i for i in range(len(objectives)) if i not in earned_indexes]
+    if not unearned_indexes:
+        return None
+        
+    system_prompt = (
+        "You are an expert strict teacher. Given an Activity, a Student Answer, and a list of unearned Objectives, "
+        "determine if the student answer newly satisfies exactly ONE of the objectives. "
+        "Output ONLY valid JSON with no markdown formatting. The format MUST be: "
+        "{\"achieved_index\": <integer or null>, \"matched_words\": [\"word1\", \"word2\"]}. "
+        "If none are satisfied, return {\"achieved_index\": null, \"matched_words\": []}. "
+        "matched_words should be a few key concepts from the answer that proved the objective."
+    )
+    
+    objectives_str = "\\n".join(f"{i}: {objectives[i]}" for i in unearned_indexes)
+    user_prompt = f"Activity: {activity_text}\\n\\nObjectives:\\n{objectives_str}\\n\\nStudent Answer: {answer}"
+    
+    res = await call_openrouter(system_prompt, user_prompt)
+    achieved = res.get("achieved_index")
+    
+    if achieved is not None and achieved in unearned_indexes:
+        return achieved, objectives[achieved], res.get("matched_words", [])
+    
+    # Fallback to simple matching if LLM fails
     answer_words = _meaningful_words(answer)
-
-    for objective_index, objective_text in enumerate(objectives):
-        objective_words = _meaningful_words(objective_text)
+    for objective_index in unearned_indexes:
+        objective_words = _meaningful_words(objectives[objective_index])
         matched_words = sorted(objective_words & answer_words)
-        if (
-            objective_index not in earned_indexes
-            and _objective_is_achieved(objective_words, matched_words)
-        ):
-            return objective_index, objective_text, matched_words
+        if _objective_is_achieved(objective_words, matched_words):
+            return objective_index, objectives[objective_index], matched_words
 
     return None
 
@@ -702,36 +749,36 @@ def _find_new_objective_achievement(
 def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) -> str:
     """
     @brief Builds a brief academic reinforcement note for a newly scored objective.
-    @param objective_text The full text of the achieved objective.
-    @param matched_words Words from the objective that appeared in the student answer.
-    @return A plain-text mini-lesson string surfacing up to three matched key terms.
     """
     if matched_words:
         focus = ", ".join(matched_words[:3])
         return (
-            f"Mini-lesson: {objective_text} depends on using key ideas like "
-            f"{focus} in a clear explanation, example, or cause-and-effect link."
+            f"Mini-lesson: '{objective_text}' is satisfied. Good use of concepts like "
+            f"{focus}."
         )
 
-    return (
-        f"Mini-lesson: {objective_text} is strongest when the answer states the "
-        "main idea clearly and supports it with one precise academic detail."
-    )
+    return f"Mini-lesson: '{objective_text}' satisfied. Good job!"
 
 
-def _next_objective_question(objective_text: str) -> str:
+async def _next_objective_question(objective_text: str, activity_text: str = "", previous_answer: str = "") -> str:
     """
-    @brief Returns a generic guidance question to steer the student toward the next objective.
-    @details The objective text is accepted as a parameter for future customization but is
-             intentionally not embedded in the question to avoid revealing answer keywords.
-    @param objective_text Text of the next unearned objective (reserved for future use).
-    @return A fixed prompt asking the student for a more specific academic detail.
+    @brief Returns an AI-generated guidance question to steer the student toward the next objective.
     """
-    _ = objective_text
-    return (
-        "What is one precise academic detail you can add next to strengthen your answer "
-        "for this activity objective?"
+    system_prompt = (
+        "You are a helpful AI tutor. Ask a short, engaging, single question to guide the student "
+        "to fulfill the target objective for the given activity. Do NOT reveal the exact objective text, "
+        "instead ask a thought-provoking question to elicit it. Output ONLY a JSON object: {\"question\": \"...\"}."
     )
+    
+    user_prompt = f"Activity: {activity_text}\\n\\nTarget Objective: {objective_text}\\n\\nPrevious Student Answer: {previous_answer}"
+    
+    res = await call_openrouter(system_prompt, user_prompt)
+    question = res.get("question")
+    
+    if question:
+        return question
+        
+    return "What is one precise academic detail you can add next to strengthen your answer for this activity objective?"
 
 
 async def _fetch_activity_status(
@@ -845,11 +892,12 @@ async def create_activity(
             title,
             description,
             objectives,
+            max_score,
             created_by,
             status
         )
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'DRAFT')
-        RETURNING id, course_id, activity_no, title, description, objectives, status
+        VALUES ($1, $2, $3, $4, $5::jsonb, $7, $6, 'DRAFT')
+        RETURNING id, course_id, activity_no, title, description, objectives, status, max_score
     """
 
     try:
@@ -862,6 +910,7 @@ async def create_activity(
                 clean_text,
                 json.dumps(clean_objectives),
                 str(instructor_id),
+                len(clean_objectives),
             )
     except UniqueViolationError as exc:
         raise HTTPException(
@@ -1169,10 +1218,11 @@ async def submitAnswer(
                     "next_question": None,
                 }
 
-            achievement = _find_new_objective_achievement(
+            achievement = await _find_new_objective_achievement(
                 objectives=objectives,
                 answer=clean_answer,
                 earned_indexes=earned_indexes,
+                activity_text=activity.get("description", "")
             )
 
             if achievement is None:
@@ -1181,7 +1231,7 @@ async def submitAnswer(
                     None,
                 )
                 next_question = (
-                    _next_objective_question(objectives[next_unearned_index])
+                    await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""), clean_answer)
                     if next_unearned_index is not None
                     else None
                 )
@@ -1264,7 +1314,7 @@ async def submitAnswer(
                     None,
                 )
                 next_question = (
-                    _next_objective_question(objectives[next_unearned_index])
+                    await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""), clean_answer)
                     if next_unearned_index is not None
                     else None
                 )
@@ -1337,7 +1387,7 @@ async def submitAnswer(
                 None,
             )
             next_question = (
-                _next_objective_question(objectives[next_unearned_index])
+                await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""), clean_answer)
                 if next_unearned_index is not None
                 else None
             )
@@ -1696,6 +1746,9 @@ async def updateActivity(
         updates.append(f"objectives = ${idx}::jsonb")
         values.append(json.dumps(clean_objectives))
         idx += 1
+        updates.append(f"max_score = ${idx}")
+        values.append(len(clean_objectives))
+        idx += 1
 
     if title is not None:
         updates.append(f"title = ${idx}")
@@ -1945,7 +1998,7 @@ async def getStudentActivity(
     )
     completed = bool(objectives) and current_score >= len(objectives)
     next_question = (
-        _next_objective_question(objectives[next_unearned_index])
+        await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""))
         if next_unearned_index is not None
         else None
     )
@@ -1968,6 +2021,9 @@ async def getStudentActivity(
         )
 
     return {
+        "activity_id": str(activity["id"]),
+        "course_id": str(course_id),
+        "activity_no": int(activity_no),
         "title": activity["title"],
         "activity_text": activity["description"],
         "status": activity_status,
@@ -2091,8 +2147,8 @@ async def listActivities(
     if password: await instructorLogin(email, password)
     instructor = await fetch_registered_instructor_by_email(pool, email)
     await _ensure_instructor_assigned_to_course(pool, str(instructor["id"]), course_id)
-    rows = await pool.fetch("SELECT id, activity_no, title, description, status FROM activities WHERE course_id::text = $1 ORDER BY activity_no ASC", course_id)
-    activities = [{"activity_id": str(r["id"]), "activity_no": r["activity_no"], "title": r["title"], "status": r["status"]} for r in rows]
+    rows = await pool.fetch("SELECT id, course_id, activity_no, title, description, status FROM activities WHERE course_id::text = $1 ORDER BY activity_no ASC", course_id)
+    activities = [{"activity_id": str(r["id"]), "course_id": str(r["course_id"]), "activity_no": r["activity_no"], "title": r["title"], "status": r["status"]} for r in rows]
     return {"activities": activities}
 
 
