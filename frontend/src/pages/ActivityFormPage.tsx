@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { instructorApi } from '../api/instructorApi';
+import type { Activity } from '../types';
 import { Plus, Trash2, ArrowLeft, Save } from 'lucide-react';
 
 export const ActivityFormPage: React.FC = () => {
@@ -11,7 +12,10 @@ export const ActivityFormPage: React.FC = () => {
 
   const [isLoading, setIsLoading] = useState(isEdit);
   const [isSaving, setIsSaving] = useState(false);
-  
+
+  // Keep the resolved activity so we have courseId + activityNumber for the PATCH endpoint
+  const [resolvedActivity, setResolvedActivity] = useState<Activity | null>(null);
+
   const [activityNumber, setActivityNumber] = useState<number>(1);
   const [text, setText] = useState('');
   const [learningObjectives, setLearningObjectives] = useState<string[]>(['']);
@@ -28,6 +32,7 @@ export const ActivityFormPage: React.FC = () => {
             const activities = await instructorApi.getCourseActivities(course.id);
             const act = activities.find(a => a.id === activityId);
             if (act) {
+              setResolvedActivity(act);
               setActivityNumber(act.activityNumber);
               setText(act.text);
               setLearningObjectives(act.learningObjectives.length > 0 ? act.learningObjectives : ['']);
@@ -72,12 +77,12 @@ export const ActivityFormPage: React.FC = () => {
 
     try {
       setIsSaving(true);
-      if (isEdit && activityId) {
-        await instructorApi.updateActivity(activityId, {
-          activityNumber,
-          text,
-          learningObjectives: validObjectives
-        });
+      if (isEdit && activityId && resolvedActivity) {
+        await instructorApi.updateActivityContent(
+          resolvedActivity.courseId,
+          resolvedActivity.activityNumber,
+          { text, objectives: validObjectives },
+        );
         navigate(-1);
       } else if (courseId) {
         await instructorApi.createActivity(courseId, {

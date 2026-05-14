@@ -25,16 +25,17 @@ export interface Activity {
 }
 
 export interface ActivityLog {
-  id: string;
-  activityId: string;
-  studentId?: string;
+  studentId: string;
   studentName: string;
-  studentEmail?: string;
-  score: number | null;
-  objectiveMetadata: unknown;
-  objectivesCompleted?: number;
-  totalObjectives?: number;
-  completed?: boolean;
-  timestamp: string;
-  eventType: string;
+  studentEmail: string;
+  activityId: string;
+  activityTitle: string;
+  courseId: string;
+  currentScore: number;
+  maxScore: number;
+  completed: boolean;
+  completionStatus: 'Completed' | 'In Progress' | 'Not Started';
+  lastQuestion: string | null;
+  lastAnswer: string | null;
+  lastInteractionAt: string | null;
 }

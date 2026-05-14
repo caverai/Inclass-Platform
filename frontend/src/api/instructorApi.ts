@@ -1,120 +1,123 @@
-
 import { apiClient } from './client';
 import type { Course, Activity, ActivityLog } from '../types';
 
-// Mock data
-let mockActivities: Activity[] = [
-  {
-    id: 'act-1',
-    courseId: 'course-1',
-    activityNumber: 1,
-    text: 'Explain how active retrieval and targeted feedback help students correct mistakes during learning.',
-    status: 'NOT_STARTED',
-    learningObjectives: ['Explain active retrieval as recall from memory', 'Explain how feedback helps students correct mistakes'],
-  },
-  {
-    id: 'act-2',
-    courseId: 'course-1',
-    activityNumber: 2,
-    text: 'Design a system architecture for a real-time chat application.',
-    status: 'ACTIVE',
-    learningObjectives: ['System design principles', 'Real-time communication protocols'],
-  },
-];
+// ---------------------------------------------------------------------------
+// Response normalizers
+// ---------------------------------------------------------------------------
 
-const mockCourses: Course[] = [
-  { id: 'course-1', title: 'Introduction to Computer Science', description: 'Basic concepts of programming.' },
-  { id: 'course-2', title: 'Advanced Software Engineering', description: 'Design patterns and scalable architectures.' },
-];
+const normalizeCourse = (raw: Record<string, unknown>): Course => ({
+  id: String(raw.id),
+  title: String(raw.course_name ?? raw.title ?? ''),
+  description: String(raw.course_code ?? raw.description ?? ''),
+});
 
-const normalizeActivityLog = (raw: Record<string, unknown>): ActivityLog => {
-  const studentId = raw.studentId ?? raw.student_id;
-  const studentEmail = raw.studentEmail ?? raw.student_email;
-  const objectivesCompleted = raw.objectivesCompleted ?? raw.objectives_completed;
-  const totalObjectives = raw.totalObjectives ?? raw.total_objectives;
+const normalizeActivity = (raw: Record<string, unknown>): Activity => {
+  const objectives = Array.isArray(raw.objectives)
+    ? (raw.objectives as unknown[]).map(String)
+    : [];
+
+  // Backend status values: DRAFT | ACTIVE | ENDED  →  frontend: NOT_STARTED | ACTIVE | ENDED
+  const rawStatus = String(raw.status ?? raw.activity_status ?? 'DRAFT');
+  const status: Activity['status'] =
+    rawStatus === 'ACTIVE' ? 'ACTIVE' :
+    rawStatus === 'ENDED'  ? 'ENDED'  : 'NOT_STARTED';
 
   return {
-    id: String(raw.id),
-    activityId: String(raw.activityId ?? raw.activity_id),
-    studentId: studentId === undefined || studentId === null ? undefined : String(studentId),
-    studentName: String(raw.studentName ?? raw.student_name ?? studentEmail ?? 'Unknown Student'),
-    studentEmail: studentEmail === undefined || studentEmail === null ? undefined : String(studentEmail),
-    score: raw.score === null || raw.score === undefined ? null : Number(raw.score),
-    objectiveMetadata: raw.objectiveMetadata ?? raw.objective_metadata ?? {},
-    objectivesCompleted: objectivesCompleted === undefined || objectivesCompleted === null
-      ? undefined
-      : Number(objectivesCompleted),
-    totalObjectives: totalObjectives === undefined || totalObjectives === null
-      ? undefined
-      : Number(totalObjectives),
-    completed: Boolean(raw.completed),
-    timestamp: String(raw.timestamp),
-    eventType: String(raw.eventType ?? raw.event_type ?? 'PARTIAL_PROGRESS'),
+    id: String(raw.activity_id ?? raw.id),
+    courseId: String(raw.course_id ?? ''),
+    activityNumber: Number(raw.activity_no ?? raw.activityNumber ?? 0),
+    text: String(raw.description ?? raw.activity_text ?? raw.text ?? ''),
+    status,
+    learningObjectives: objectives,
   };
 };
 
+const normalizeActivityLog = (raw: Record<string, unknown>): ActivityLog => ({
+  studentId:        String(raw.student_id),
+  studentName:      String(raw.student_name ?? raw.student_email ?? 'Unknown'),
+  studentEmail:     String(raw.student_email ?? ''),
+  activityId:       String(raw.activity_id),
+  activityTitle:    String(raw.activity_title ?? ''),
+  courseId:         String(raw.course_id),
+  currentScore:     Number(raw.current_score ?? 0),
+  maxScore:         Number(raw.max_score ?? 0),
+  completed:        Boolean(raw.completed),
+  completionStatus: (raw.completion_status as ActivityLog['completionStatus']) ?? 'Not Started',
+  lastQuestion:     raw.last_question != null ? String(raw.last_question) : null,
+  lastAnswer:       raw.last_answer   != null ? String(raw.last_answer)   : null,
+  lastInteractionAt: raw.last_interaction_at != null ? String(raw.last_interaction_at) : null,
+});
+
+// ---------------------------------------------------------------------------
+// API surface
+// ---------------------------------------------------------------------------
+
 export const instructorApi = {
-  getCourses: async () => {
-    // return apiClient.get<Course[]>('/instructor/courses').then(res => res.data);
-    return new Promise<Course[]>((resolve) => setTimeout(() => resolve(mockCourses), 300));
+  getCourses: async (): Promise<Course[]> => {
+    const res = await apiClient.get('/instructor/courses');
+    const raw: unknown[] = res.data?.courses ?? res.data ?? [];
+    return raw.map(r => normalizeCourse(r as Record<string, unknown>));
   },
 
-  getCourseActivities: async (courseId: string) => {
-    // return apiClient.get<Activity[]>(`/instructor/courses/${courseId}/activities`).then(res => res.data);
-    return new Promise<Activity[]>((resolve) => 
-      setTimeout(() => resolve(mockActivities.filter(a => a.courseId === courseId)), 300)
-    );
+  getCourseActivities: async (courseId: string): Promise<Activity[]> => {
+    const res = await apiClient.get('/instructor/activities', { params: { course_id: courseId } });
+    const raw: unknown[] = res.data?.activities ?? res.data ?? [];
+    return raw.map(r => normalizeActivity(r as Record<string, unknown>));
   },
 
-  createActivity: async (courseId: string, data: Omit<Activity, 'id' | 'courseId' | 'status'>) => {
-    // return apiClient.post<Activity>(`/instructor/courses/${courseId}/activities`, data).then(res => res.data);
-    return new Promise<Activity>((resolve) => {
-      setTimeout(() => {
-        const newActivity: Activity = {
-          ...data,
-          id: `act-${Date.now()}`,
-          courseId,
-          status: 'NOT_STARTED',
-        };
-        mockActivities.push(newActivity);
-        resolve(newActivity);
-      }, 300);
+  createActivity: async (courseId: string, data: Omit<Activity, 'id' | 'courseId' | 'status'>): Promise<Activity> => {
+    const res = await apiClient.post('/instructor/activity/create', {
+      course_id: courseId,
+      activity_no: data.activityNumber,
+      activity_text: data.text,
+      objectives: data.learningObjectives,
+    });
+    return normalizeActivity(res.data as Record<string, unknown>);
+  },
+
+  updateActivity: async (activityId: string, data: Partial<Activity>): Promise<Activity> => {
+    // We need courseId + activity_no for the PATCH endpoint.
+    // The frontend passes activityId (UUID). We resolve courseId/activity_no via
+    // a full scan only in the edit form path; for status transitions we use the
+    // dedicated start/end/reset endpoints below instead of this generic stub.
+    // This stub is kept for the ActivityFormPage edit path which provides courseId.
+    throw new Error(`updateActivity stub called for ${activityId} — use specific action methods`);
+    return data as Activity; // unreachable; satisfies TS return type
+  },
+
+  updateActivityContent: async (
+    courseId: string,
+    activityNo: number,
+    data: { text?: string; objectives?: string[]; title?: string },
+  ): Promise<void> => {
+    await apiClient.patch(`/instructor/activity/${courseId}/${activityNo}`, {
+      activity_text: data.text,
+      objectives: data.objectives,
+      title: data.title,
     });
   },
 
-  updateActivity: async (activityId: string, data: Partial<Activity>) => {
-    // return apiClient.patch<Activity>(`/instructor/activities/${activityId}`, data).then(res => res.data);
-    return new Promise<Activity>((resolve, reject) => {
-      setTimeout(() => {
-        const index = mockActivities.findIndex(a => a.id === activityId);
-        if (index > -1) {
-          mockActivities[index] = { ...mockActivities[index], ...data };
-          resolve(mockActivities[index]);
-        } else {
-          reject(new Error('Activity not found'));
-        }
-      }, 300);
+  startActivity: async (activityId: string, courseId: string, activityNo: number): Promise<void> => {
+    await apiClient.post('/instructor/activity/start', null, {
+      params: { course_id: courseId, activity_no: activityNo },
     });
   },
 
-  startActivity: async (activityId: string) => {
-    // return apiClient.post<Activity>(`/instructor/activities/${activityId}/start`).then(res => res.data);
-    return instructorApi.updateActivity(activityId, { status: 'ACTIVE' });
+  endActivity: async (activityId: string, courseId: string, activityNo: number): Promise<void> => {
+    await apiClient.post('/instructor/activity/end', null, {
+      params: { course_id: courseId, activity_no: activityNo },
+    });
   },
 
-  endActivity: async (activityId: string) => {
-    // return apiClient.post<Activity>(`/instructor/activities/${activityId}/end`).then(res => res.data);
-    return instructorApi.updateActivity(activityId, { status: 'ENDED' });
+  resetActivity: async (activityId: string, courseId: string, activityNo: number): Promise<void> => {
+    await apiClient.post('/instructor/activity/reset', null, {
+      params: { course_id: courseId, activity_no: activityNo },
+    });
   },
 
-  resetActivity: async (activityId: string) => {
-    // return apiClient.post<Activity>(`/instructor/activities/${activityId}/reset`).then(res => res.data);
-    return instructorApi.updateActivity(activityId, { status: 'ENDED' });
-  },
-
-  getActivityLogs: async (activityId: string) => {
-    const response = await apiClient.get(`/instructor/activities/${activityId}/logs`);
-    const rawLogs = Array.isArray(response.data) ? response.data : response.data?.logs ?? [];
-    return rawLogs.map((raw: Record<string, unknown>) => normalizeActivityLog(raw));
+  getActivityLogs: async (activityId: string): Promise<ActivityLog[]> => {
+    const res = await apiClient.get(`/instructor/activities/${activityId}/logs`);
+    const raw: unknown[] = Array.isArray(res.data) ? res.data : res.data?.logs ?? [];
+    return raw.map(r => normalizeActivityLog(r as Record<string, unknown>));
   },
 };

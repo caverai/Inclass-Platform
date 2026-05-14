@@ -44,13 +44,16 @@ export const InstructorCoursePage: React.FC = () => {
 
   const handleAction = async () => {
     const { type, activityId } = modalState;
-    if (!activityId || !type) return;
+    if (!activityId || !type || !courseId) return;
+
+    const activity = activities.find(a => a.id === activityId);
+    if (!activity) return;
 
     try {
-      if (type === 'START') await instructorApi.startActivity(activityId);
-      if (type === 'END') await instructorApi.endActivity(activityId);
-      if (type === 'RESET') await instructorApi.resetActivity(activityId);
-      
+      if (type === 'START') await instructorApi.startActivity(activityId, courseId, activity.activityNumber);
+      if (type === 'END')   await instructorApi.endActivity(activityId, courseId, activity.activityNumber);
+      if (type === 'RESET') await instructorApi.resetActivity(activityId, courseId, activity.activityNumber);
+
       await fetchData(); // refresh list
     } catch (error) {
       console.error(`Failed to ${type} activity`, error);
