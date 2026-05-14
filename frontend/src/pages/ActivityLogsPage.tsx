@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { instructorApi } from '../api/instructorApi';
-import type { ActivityLog } from '../types';
+import type { ActivityCompletionLog, ActivityLog } from '../types';
 import { AlertCircle, ArrowLeft, User, Clock, CheckCircle2, Circle, Loader2 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -55,24 +55,50 @@ export const ActivityLogsPage: React.FC = () => {
   const { activityId } = useParams<{ activityId: string }>();
   const navigate = useNavigate();
   const [logs, setLogs] = useState<ActivityLog[]>([]);
+  const [completionLogs, setCompletionLogs] = useState<ActivityCompletionLog[]>([]);
   const [activityTitle, setActivityTitle] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
+  const [completionError, setCompletionError] = useState('');
 
   useEffect(() => {
     const fetchLogs = async () => {
       if (!activityId) return;
-      try {
-        setError('');
-        const data = await instructorApi.getActivityLogs(activityId);
-        setLogs(data);
-        if (data.length > 0) setActivityTitle(data[0].activityTitle);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to fetch activity logs.');
+      setIsLoading(true);
+      setError('');
+      setCompletionError('');
+
+      const [activityResult, completionResult] = await Promise.allSettled([
+        instructorApi.getActivityLogs(activityId),
+        instructorApi.getActivityCompletionLogs(activityId),
+      ]);
+
+      if (activityResult.status === 'fulfilled') {
+        setLogs(activityResult.value);
+        if (activityResult.value.length > 0) {
+          setActivityTitle(activityResult.value[0].activityTitle);
+        }
+      } else {
+        setError(
+          activityResult.reason instanceof Error
+            ? activityResult.reason.message
+            : 'Failed to fetch activity logs.',
+        );
         setLogs([]);
-      } finally {
-        setIsLoading(false);
       }
+
+      if (completionResult.status === 'fulfilled') {
+        setCompletionLogs(completionResult.value);
+      } else {
+        setCompletionError(
+          completionResult.reason instanceof Error
+            ? completionResult.reason.message
+            : 'Failed to fetch completion logs.',
+        );
+        setCompletionLogs([]);
+      }
+
+      setIsLoading(false);
     };
     fetchLogs();
   }, [activityId]);
@@ -114,6 +140,33 @@ export const ActivityLogsPage: React.FC = () => {
         </div>
       ) : (
         <>
+          <div className="bg-white shadow-sm rounded-lg border border-gray-200 p-5 mb-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-3">Completion Events</h2>
+            {completionError ? (
+              <p className="text-sm text-red-600">{completionError}</p>
+            ) : completionLogs.length === 0 ? (
+              <p className="text-sm text-gray-500">No completion events yet.</p>
+            ) : (
+              <ul className="space-y-2">
+                {completionLogs.map((log) => (
+                  <li
+                    key={`${log.activityId}-${log.studentId}-${log.createdAt ?? 'unknown'}`}
+                    className="flex items-center justify-between gap-4 text-sm text-gray-700"
+                  >
+                    <span>
+                      <span className="font-semibold">{log.studentName}</span> completed{' '}
+                      <span className="font-semibold">{log.activityTitle}</span>.
+                    </span>
+                    <span className="flex items-center text-xs text-gray-500">
+                      <Clock className="h-3 w-3 mr-1" />
+                      {formatDateTime(log.createdAt)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           {/* Summary bar */}
           {logs.length > 0 && (
             <div className="grid grid-cols-3 gap-4 mb-6">

@@ -213,5 +213,5 @@ WHERE u.school_email = 'student@school.edu';
 
 ## Known Limitations
 
-- `/student/activities/:id` and `/student/activities/:id/chat` are called by the frontend React app but are not implemented in the backend. The backend uses composite key routes (`course_id` + `activity_no`). These frontend paths will 404 unless a migration to UUID-based routes is done.
+- `/student/activities/:id` and `/student/activities/:id/chat` are supported for UUID-based activity access in addition to the composite key routes.
 - The grading script fallback in `verify_student` / `verify_instructor` must be removed before any production deployment.

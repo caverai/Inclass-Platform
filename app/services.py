@@ -1092,6 +1092,13 @@ async def submitAnswer(
                     last_question=None,
                     last_answer=clean_answer,
                 )
+                await _log_activity_action(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    action_type="COMPLETED",
+                )
                 return {
                     "score_delta": 0,
                     "score": current_score,
@@ -1213,6 +1220,14 @@ async def submitAnswer(
                     last_question=None if completed else next_question,
                     last_answer=clean_answer,
                 )
+                if completed:
+                    await _log_activity_action(
+                        conn=conn,
+                        student_id=str(student["id"]),
+                        course_id=str(activity["course_id"]),
+                        activity_id=str(activity["id"]),
+                        action_type="COMPLETED",
+                    )
                 return {
                     "score_delta": 0,
                     "score": latest_score,
@@ -1300,6 +1315,15 @@ async def submitAnswer(
                 last_question=None if completed else next_question,
                 last_answer=clean_answer,
             )
+
+            if completed:
+                await _log_activity_action(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    action_type="COMPLETED",
+                )
 
             return response
 
@@ -1480,6 +1504,81 @@ async def getActivityLogs(
     _STATUS_ORDER = {"Completed": 0, "In Progress": 1, "Not Started": 2}
     logs.sort(key=lambda item: (_STATUS_ORDER.get(item["completion_status"], 9), item["student_name"]))
     return logs
+
+
+async def getActivityCompletionLogs(
+    email: str,
+    password: str,
+    activity_id: str,
+) -> list[dict]:
+    """
+    @brief Returns completion log events for a specific activity.
+    @details Includes only completed actions and is ordered by most recent first.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+
+    activity = await pool.fetchrow(
+        """
+        SELECT id, course_id, title
+        FROM   activities
+        WHERE  id::text = $1
+        LIMIT  1
+        """,
+        str(activity_id),
+    )
+
+    if activity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found.",
+        )
+
+    await _ensure_instructor_assigned_to_course(
+        pool,
+        str(instructor["id"]),
+        str(activity["course_id"]),
+    )
+
+    rows = await pool.fetch(
+        """
+        SELECT
+            aal.student_id::text AS student_id,
+            u.full_name          AS student_name,
+            u.school_email       AS student_email,
+            aal.action_type      AS action_type,
+            aal.created_at       AS created_at
+        FROM activity_action_logs aal
+        JOIN users u ON u.id = aal.student_id
+        WHERE aal.activity_id = $1
+          AND aal.action_type = 'COMPLETED'
+        ORDER BY aal.created_at DESC
+        """,
+        activity["id"],
+    )
+
+    return [
+        {
+            "student_id": row["student_id"],
+            "student_name": row["student_name"] or row["student_email"],
+            "student_email": row["student_email"],
+            "activity_id": str(activity["id"]),
+            "activity_title": activity["title"],
+            "course_id": str(activity["course_id"]),
+            "action_type": row["action_type"],
+            "created_at": row["created_at"].isoformat() if isinstance(row["created_at"], datetime) else None,
+        }
+        for row in rows
+    ]
 
 
 async def updateActivity(
@@ -1706,6 +1805,36 @@ async def _upsert_student_activity_progress(
     )
 
 
+async def _log_activity_action(
+    conn: asyncpg.Connection,
+    student_id: str,
+    course_id: str,
+    activity_id: str,
+    action_type: str,
+) -> None:
+    """
+    @brief Records a student activity action event (e.g., COMPLETED).
+    @details Uses ON CONFLICT to ensure the same action is logged once per activity.
+    """
+    await conn.execute(
+        """
+        INSERT INTO activity_action_logs (
+            student_id,
+            course_id,
+            activity_id,
+            action_type
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (student_id, activity_id, action_type)
+        DO NOTHING
+        """,
+        student_id,
+        course_id,
+        activity_id,
+        action_type,
+    )
+
+
 async def getStudentActivity(
     email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
@@ -1787,6 +1916,76 @@ async def getStudentActivity(
         "completed": completed,
         "next_question": next_question if not completed else None,
     }
+
+
+async def _fetch_activity_reference_by_id(
+    pool: asyncpg.Pool,
+    activity_id: str,
+) -> tuple[str, int]:
+    """
+    @brief Resolves an activity UUID to its course_id and activity_no.
+    @throws HTTPException 404 if activity does not exist.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT course_id::text AS course_id, activity_no
+        FROM activities
+        WHERE id::text = $1
+        LIMIT 1
+        """,
+        str(activity_id),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Activity not found.")
+    return str(row["course_id"]), int(row["activity_no"])
+
+
+async def getStudentActivityById(
+    email: str,
+    password: str,
+    activity_id: str,
+) -> dict:
+    """
+    @brief Wrapper for getStudentActivity using activity UUIDs.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+    course_id, activity_no = await _fetch_activity_reference_by_id(pool, activity_id)
+    return await getStudentActivity(
+        email=email,
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+    )
+
+
+async def submitAnswerByActivityId(
+    email: str,
+    password: str,
+    activity_id: str,
+    answer: str,
+) -> dict:
+    """
+    @brief Wrapper for submitAnswer using activity UUIDs.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+    course_id, activity_no = await _fetch_activity_reference_by_id(pool, activity_id)
+    return await submitAnswer(
+        email=email,
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+        answer=answer,
+    )
 async def resetActivity(
     email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
@@ -1813,6 +2012,7 @@ async def resetActivity(
             if not activity: raise HTTPException(404, detail="Not found.")
             await conn.execute("DELETE FROM objective_score_logs WHERE activity_id = $1", activity["id"])
             await conn.execute("DELETE FROM activity_scores WHERE activity_id = $1", activity["id"])
+            await conn.execute("DELETE FROM activity_action_logs WHERE activity_id = $1", activity["id"])
             await conn.execute("DELETE FROM student_activity_progress WHERE activity_id = $1", activity["id"])
             await conn.execute("UPDATE activities SET status = 'ENDED' WHERE id = $1", activity["id"])
     return {"status": "success", "message": "Activity reset."}

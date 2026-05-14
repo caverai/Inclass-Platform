@@ -54,6 +54,9 @@ from app.services import (
     getStudentActivity,
     getActivityLogs,
     getStudentCourses,
+    getActivityCompletionLogs,
+    getStudentActivityById,
+    submitAnswerByActivityId,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -199,6 +202,12 @@ class SubmitAnswerRequest(BaseModel):
     course_id: str
     activity_no: int
     answer: str
+
+
+class StudentChatRequest(BaseModel):
+    """Request model for student chat answers via activity id."""
+    answer: str
+    password: Optional[str] = None
 
 
 
@@ -585,6 +594,46 @@ async def api_submit_answer(
         password=body.password or "",
         course_id=body.course_id,
         activity_no=body.activity_no,
+        answer=body.answer,
+    )
+
+
+@app.get(
+    "/student/activities/{activity_id}",
+    summary="Get activity details by activity id",
+    tags=["Student"],
+)
+async def api_get_student_activity_by_id(
+    activity_id: str,
+    current_user: dict = Depends(verify_student),
+) -> dict:
+    """
+    @brief Returns the activity payload and progress using the activity UUID.
+    """
+    return await getStudentActivityById(
+        email=current_user["email"],
+        password="",
+        activity_id=activity_id,
+    )
+
+
+@app.post(
+    "/student/activities/{activity_id}/chat",
+    summary="Submit an answer for an activity by id",
+    tags=["Student"],
+)
+async def api_submit_answer_by_id(
+    activity_id: str,
+    body: StudentChatRequest,
+    current_user: dict = Depends(verify_student),
+) -> dict:
+    """
+    @brief Scores a student answer using the activity UUID.
+    """
+    return await submitAnswerByActivityId(
+        email=current_user["email"],
+        password=body.password or "",
+        activity_id=activity_id,
         answer=body.answer,
     )
 
@@ -993,6 +1042,29 @@ async def api_get_activity_logs(
     password = fallback_creds.get("password", "")
 
     return await getActivityLogs(
+        email=current_user["email"],
+        password=password,
+        activity_id=activity_id,
+    )
+
+
+@app.get(
+    "/instructor/activities/{activity_id}/completion-logs",
+    summary="Get activity completion logs",
+    tags=["Instructor"],
+)
+async def api_get_activity_completion_logs(
+    request: Request,
+    activity_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> list[dict]:
+    """
+    @brief Returns completion events for a specific activity.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await getActivityCompletionLogs(
         email=current_user["email"],
         password=password,
         activity_id=activity_id,

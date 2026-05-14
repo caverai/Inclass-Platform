@@ -39,3 +39,14 @@ export interface ActivityLog {
   lastAnswer: string | null;
   lastInteractionAt: string | null;
 }
+
+export interface ActivityCompletionLog {
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  activityId: string;
+  activityTitle: string;
+  courseId: string;
+  action: 'COMPLETED';
+  createdAt: string | null;
+}

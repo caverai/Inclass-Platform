@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { Course, Activity, ActivityLog } from '../types';
+import type { Course, Activity, ActivityLog, ActivityCompletionLog } from '../types';
 
 // ---------------------------------------------------------------------------
 // Response normalizers
@@ -46,6 +46,17 @@ const normalizeActivityLog = (raw: Record<string, unknown>): ActivityLog => ({
   lastQuestion:     raw.last_question != null ? String(raw.last_question) : null,
   lastAnswer:       raw.last_answer   != null ? String(raw.last_answer)   : null,
   lastInteractionAt: raw.last_interaction_at != null ? String(raw.last_interaction_at) : null,
+});
+
+const normalizeActivityCompletionLog = (raw: Record<string, unknown>): ActivityCompletionLog => ({
+  studentId: String(raw.student_id),
+  studentName: String(raw.student_name ?? raw.student_email ?? 'Unknown'),
+  studentEmail: String(raw.student_email ?? ''),
+  activityId: String(raw.activity_id),
+  activityTitle: String(raw.activity_title ?? ''),
+  courseId: String(raw.course_id),
+  action: 'COMPLETED',
+  createdAt: raw.created_at != null ? String(raw.created_at) : null,
 });
 
 // ---------------------------------------------------------------------------
@@ -109,5 +120,11 @@ export const instructorApi = {
     const res = await apiClient.get(`/instructor/activities/${activityId}/logs`);
     const raw: unknown[] = Array.isArray(res.data) ? res.data : res.data?.logs ?? [];
     return raw.map(r => normalizeActivityLog(r as Record<string, unknown>));
+  },
+
+  getActivityCompletionLogs: async (activityId: string): Promise<ActivityCompletionLog[]> => {
+    const res = await apiClient.get(`/instructor/activities/${activityId}/completion-logs`);
+    const raw: unknown[] = Array.isArray(res.data) ? res.data : res.data?.logs ?? [];
+    return raw.map(r => normalizeActivityCompletionLog(r as Record<string, unknown>));
   },
 };

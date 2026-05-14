@@ -91,9 +91,9 @@ class TestResetActivityCascade:
 
         assert result["status"] == "success"
 
-        # Verify the cascade: 3 DELETEs + 1 UPDATE = 4 execute calls
+        # Verify the cascade: 4 DELETEs + 1 UPDATE = 5 execute calls
         execute_calls = mock_conn.execute.call_args_list
-        assert len(execute_calls) == 4
+        assert len(execute_calls) == 5
 
         # Extract SQL from each call
         sql_statements = [c.args[0] for c in execute_calls]
@@ -103,6 +103,8 @@ class TestResetActivityCascade:
             "Must DELETE FROM objective_score_logs"
         assert any("activity_scores" in sql for sql in sql_statements), \
             "Must DELETE FROM activity_scores"
+        assert any("activity_action_logs" in sql for sql in sql_statements), \
+            "Must DELETE FROM activity_action_logs"
         assert any("student_activity_progress" in sql for sql in sql_statements), \
             "Must DELETE FROM student_activity_progress"
 
