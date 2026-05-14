@@ -1,0 +1,10 @@
+Story ID,Title,Description,Assigned To,Status,Start Date,End Date,Estimate (SP)
+US-E,List Activities,Implement database query and role middleware reuse,Necati Onur Yaman,Done,2026-05-11,2026-05-11,2
+US-F,Create Activity,Implement standard INSERT leveraging established contracts,Başar Metin,Done,2026-05-10,2026-05-10,3
+US-K,Objective Scoring,Runs concurrently with tutoring flow logic,Ceyda Akgün,Done,2026-05-11,2026-05-11,7
+US-G,Update Activity,Dynamic SQL UPDATE and logic handling,Mustafa Garip,Done,2026-05-11,2026-05-11,3
+US-L,Manual Grading,Simple UPSERT without complex state validation,Aksel Uğur,Done,2026-05-11,2026-05-11,4
+US-M,Reset Activity,Basic DELETE on scores and UPDATE on status,Necati Onur Yaman,Done,2026-05-11,2026-05-11,3
+US-I,Student Access Control,Reuse of verify_student and state-fetching logic,Başar Metin,Done,2026-05-11,2026-05-11,3
+US-J,Tutoring Flow,Complex LLM prompt engineering and standard routing,Ceyda Akgün,Done,2026-05-12,2026-05-12,7
+TECH-2,Automated Test Coverage,Implement automated unit/integration tests,Mustafa Garip,Done,2026-05-13,2026-05-13,3

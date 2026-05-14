@@ -68,6 +68,16 @@ CREATE TABLE IF NOT EXISTS student_activity_progress (
     UNIQUE (student_id, activity_id)
 );
 
+CREATE TABLE IF NOT EXISTS activity_action_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    activity_id UUID NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    action_type TEXT NOT NULL CHECK (action_type IN ('COMPLETED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (student_id, activity_id, action_type)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (school_email);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users (role);
 CREATE INDEX IF NOT EXISTS idx_mapping_instructor ON instructor_course_mapping (instructor_id);
@@ -81,6 +91,18 @@ CREATE INDEX IF NOT EXISTS idx_student_activity_progress_student
     ON student_activity_progress (student_id);
 CREATE INDEX IF NOT EXISTS idx_student_activity_progress_activity
     ON student_activity_progress (activity_id);
+
+CREATE INDEX IF NOT EXISTS idx_activity_action_logs_activity
+    ON activity_action_logs (activity_id);
+
+CREATE INDEX IF NOT EXISTS idx_activity_action_logs_student
+    ON activity_action_logs (student_id);
+
+CREATE INDEX IF NOT EXISTS idx_activity_action_logs_course
+    ON activity_action_logs (course_id);
+
+CREATE INDEX IF NOT EXISTS idx_activity_action_logs_created_at
+    ON activity_action_logs (created_at DESC);
 
 -- Optional seed for quick smoke test; replace domain/email before use.
 -- INSERT INTO users (school_email, full_name, role)

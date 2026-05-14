@@ -18,7 +18,6 @@ from asyncpg.exceptions import UniqueViolationError
 from jose import jwt
 from passlib.context import CryptContext
 
-# Global pool for the service layer
 db_pool: asyncpg.Pool | None = None
 
 JWT_SECRET: str = os.environ.get("JWT_SECRET", "")
@@ -261,7 +260,6 @@ async def update_user_password(
     async with pool.acquire() as conn:
         status_msg = await conn.execute(query, hashed_password, str(user_id))
 
-    # 'UPDATE 1' indicates exactly one row was modified.
     success = status_msg == "UPDATE 1"
     if success:
         logger.info("Password updated for user_id=%s", user_id)
@@ -306,16 +304,13 @@ async def instructorLogin(email: str, password: str) -> dict:
     """
     pool = db_pool
 
-    # 1. Fetch instructor
     instructor = await fetch_registered_instructor_by_email(pool, email)
 
-    # 2. Fetch and verify hash
     stored_hash = await fetch_password_hash_by_email(pool, email)
     if not stored_hash or not PasswordHasher.verify(password, stored_hash):
         logger.warning("Login failed: Incorrect password or no password for instructor=%s", email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    # 3. Return the response dict the instructor script expects
     access_token = create_access_token(
         user_id=str(instructor["id"]),
         email=instructor["school_email"],
@@ -331,6 +326,80 @@ async def instructorLogin(email: str, password: str) -> dict:
     }
 
 
+async def studentLogin(email: str, password: str) -> dict:
+    """
+    @brief Authenticates a student using email and password.
+    @param email School email address of the student.
+    @param password Plain-text password to verify against the stored bcrypt hash.
+    @return Dictionary with keys: access_token, token_type, user_id, role, email.
+    @throws HTTPException 401 If credentials are invalid or no password is set.
+    @throws HTTPException 404 If no student account exists for the given email.
+    """
+    pool = db_pool
+    student = await fetch_registered_student_by_email(pool, email)
+
+    stored_hash = await fetch_password_hash_by_email(pool, email)
+    if not stored_hash or not PasswordHasher.verify(password, stored_hash):
+        logger.warning("Login failed: Incorrect password for student=%s", email)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    access_token = create_access_token(
+        user_id=str(student["id"]),
+        email=student["school_email"],
+        role=student["role"],
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": str(student["id"]),
+        "role": student["role"],
+        "email": student["school_email"],
+    }
+
+
+async def registerStudent(email: str, password: str, full_name: str) -> dict:
+    """
+    @brief Creates a new student account and issues a JWT.
+    @param email School email address; stored lowercase; must be unique.
+    @param password Plain-text password; hashed with bcrypt before storage.
+    @param full_name Display name stored in users.full_name.
+    @return Dictionary with keys: access_token, token_type, user_id, role, email, name.
+    @throws HTTPException 400 If a user with the same email already exists.
+    """
+    pool = db_pool
+    hashed_password = PasswordHasher.hash(password)
+
+    query = """
+        INSERT INTO users (school_email, full_name, role, password_hash)
+        VALUES ($1, $2, 'student', $3)
+        RETURNING id, school_email, role, full_name
+    """
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(query, email.lower(), full_name, hashed_password)
+    except UniqueViolationError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this email already exists."
+        )
+
+    access_token = create_access_token(
+        user_id=str(row["id"]),
+        email=row["school_email"],
+        role=row["role"],
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": str(row["id"]),
+        "role": row["role"],
+        "email": row["school_email"],
+        "name": row["full_name"]
+    }
+
+
 async def listMyCourses(email: str, password: str) -> dict:
     """
     @brief Retrieves the courses assigned to an instructor after optional credential validation.
@@ -341,13 +410,11 @@ async def listMyCourses(email: str, password: str) -> dict:
     """
     pool = db_pool
 
-    # 1. Verify credentials (you can call instructorLogin here to validate)
     if password:
         await instructorLogin(email, password)
 
     instructor = await fetch_registered_instructor_by_email(pool, email)
 
-    # 2. Fetch courses
     courses = await fetch_instructor_courses(pool, str(instructor["id"]))
     return {"courses": [dict(c) for c in courses]}
 
@@ -460,7 +527,14 @@ async def _ensure_student_enrolled_in_course(
     student_id: str,
     course_id: str,
 ) -> None:
-    """Validate that a student belongs to the target course."""
+    """
+    @brief Validates that a student is enrolled in the target course.
+    @param pool The asyncpg connection pool instance.
+    @param student_id The student user identifier as a string.
+    @param course_id The target course identifier as a string.
+    @return None.
+    @throws HTTPException 403 If no matching row exists in student_course_mapping.
+    """
     query = """
         SELECT 1
         FROM   student_course_mapping
@@ -479,7 +553,13 @@ async def _ensure_student_enrolled_in_course(
 
 
 def _coerce_objectives_payload(objectives: object) -> list[str]:
-    """Return activity objectives as a clean list of strings."""
+    """
+    @brief Normalizes the objectives field from a database row into a list of strings.
+    @details Handles both raw JSON strings (from asyncpg text columns) and already-parsed
+             lists. Blank entries are filtered out.
+    @param objectives Raw value from activities.objectives; may be a JSON string or list.
+    @return List of non-empty objective strings; empty list if input is invalid.
+    """
     raw_objectives = objectives
     if isinstance(raw_objectives, str):
         try:
@@ -499,9 +579,11 @@ def _coerce_objectives_payload(objectives: object) -> list[str]:
 
 def _meaningful_words(text: str) -> set[str]:
     """
-    Normalize text for deterministic objective matching.
-    The heuristic lowercases, removes punctuation, splits words, and ignores
-    very short/common words so objective-specific terms drive scoring.
+    @brief Extracts meaningful words from text for objective matching.
+    @details Lowercases, strips punctuation, splits on whitespace, and removes
+             stop words and tokens shorter than 3 characters.
+    @param text Raw answer or objective string.
+    @return Set of normalized content words; empty set if text is blank.
     """
     normalized = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
     return {
@@ -512,7 +594,14 @@ def _meaningful_words(text: str) -> set[str]:
 
 
 def _objective_is_achieved(objective_words: set[str], matched_words: list[str]) -> bool:
-    """Require a simple majority of meaningful objective words to appear."""
+    """
+    @brief Determines whether enough objective words appear in a student answer.
+    @details For objectives with 1-2 words all must match. For longer objectives
+             at least 60% of words must match, with a floor of 2.
+    @param objective_words Set of meaningful words extracted from the objective text.
+    @param matched_words List of words present in both the objective and the answer.
+    @return True if the required match threshold is met; False otherwise.
+    """
     if not objective_words:
         return False
 
@@ -529,7 +618,14 @@ def _find_new_objective_achievement(
     answer: str,
     earned_indexes: set[int],
 ) -> tuple[int, str, list[str]] | None:
-    """Find the first achieved objective that has not already earned a point."""
+    """
+    @brief Scans objectives for the first one newly satisfied by the student answer.
+    @param objectives Full list of objective strings for the activity.
+    @param answer The student's submitted answer text.
+    @param earned_indexes Set of objective indexes already awarded a point.
+    @return Tuple of (objective_index, objective_text, matched_words) for the first
+            newly achieved objective, or None if no new objective is satisfied.
+    """
     answer_words = _meaningful_words(answer)
 
     for objective_index, objective_text in enumerate(objectives):
@@ -545,7 +641,12 @@ def _find_new_objective_achievement(
 
 
 def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) -> str:
-    """Create a short academic note only after a new objective earns credit."""
+    """
+    @brief Builds a brief academic reinforcement note for a newly scored objective.
+    @param objective_text The full text of the achieved objective.
+    @param matched_words Words from the objective that appeared in the student answer.
+    @return A plain-text mini-lesson string surfacing up to three matched key terms.
+    """
     if matched_words:
         focus = ", ".join(matched_words[:3])
         return (
@@ -560,8 +661,14 @@ def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) 
 
 
 def _next_objective_question(objective_text: str) -> str:
-    """Ask a single guidance question that steers toward the next objective."""
-    _ = objective_text  # Objective is selected internally; prompt should not reveal answers directly.
+    """
+    @brief Returns a generic guidance question to steer the student toward the next objective.
+    @details The objective text is accepted as a parameter for future customization but is
+             intentionally not embedded in the question to avoid revealing answer keywords.
+    @param objective_text Text of the next unearned objective (reserved for future use).
+    @return A fixed prompt asking the student for a more specific academic detail.
+    """
+    _ = objective_text
     return (
         "What is one precise academic detail you can add next to strengthen your answer "
         "for this activity objective?"
@@ -985,6 +1092,13 @@ async def submitAnswer(
                     last_question=None,
                     last_answer=clean_answer,
                 )
+                await _log_activity_action(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    action_type="COMPLETED",
+                )
                 return {
                     "score_delta": 0,
                     "score": current_score,
@@ -1106,6 +1220,14 @@ async def submitAnswer(
                     last_question=None if completed else next_question,
                     last_answer=clean_answer,
                 )
+                if completed:
+                    await _log_activity_action(
+                        conn=conn,
+                        student_id=str(student["id"]),
+                        course_id=str(activity["course_id"]),
+                        activity_id=str(activity["id"]),
+                        action_type="COMPLETED",
+                    )
                 return {
                     "score_delta": 0,
                     "score": latest_score,
@@ -1194,7 +1316,270 @@ async def submitAnswer(
                 last_answer=clean_answer,
             )
 
+            if completed:
+                await _log_activity_action(
+                    conn=conn,
+                    student_id=str(student["id"]),
+                    course_id=str(activity["course_id"]),
+                    activity_id=str(activity["id"]),
+                    action_type="COMPLETED",
+                )
+
             return response
+
+
+def _json_safe(value: object) -> object:
+    """
+    @brief Converts a database value to a JSON-serializable form.
+    @param value Any value returned from an asyncpg row field.
+    @return ISO-format string for datetime values; the original value otherwise.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
+
+
+def _coerce_json_object(value: object) -> dict:
+    """
+    @brief Normalizes a JSONB field value to a Python dict.
+    @details asyncpg may return JSONB columns as a dict or as a raw JSON string
+             depending on driver version and column type. Both cases are handled.
+    @param value Raw field value from an asyncpg row.
+    @return Parsed dict; empty dict if value is missing, unparseable, or not an object.
+    """
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    return {}
+
+
+def _timestamp_or_none(value: object) -> datetime | None:
+    """
+    @brief Coerces a value to a timezone-aware datetime or returns None.
+    @param value A datetime object, an ISO-format string, or any other type.
+    @return Timezone-aware datetime if conversion succeeds; None otherwise.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    return None
+
+
+def _latest_timestamp(*values: object) -> datetime | None:
+    """
+    @brief Returns the most recent timezone-aware datetime from a variable argument list.
+    @param values Any mix of datetime objects, ISO strings, or other types.
+    @return The maximum datetime among parseable values; None if no valid timestamps found.
+    """
+    timestamps = [value for value in (_timestamp_or_none(item) for item in values) if value]
+    return max(timestamps) if timestamps else None
+
+
+async def getActivityLogs(
+    email: str,
+    password: str,
+    activity_id: str,
+) -> list[dict]:
+    """
+    @brief Returns per-student completion logs for an instructor activity.
+    @details Uses student_activity_progress as the primary source of truth.
+             LEFT JOINs from student_course_mapping so every enrolled student
+             appears even if they have not yet interacted with the activity.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+
+    activity = await pool.fetchrow(
+        """
+        SELECT id, course_id, title, objectives
+        FROM   activities
+        WHERE  id::text = $1
+        LIMIT  1
+        """,
+        str(activity_id),
+    )
+
+    if activity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found.",
+        )
+
+    await _ensure_instructor_assigned_to_course(
+        pool,
+        str(instructor["id"]),
+        str(activity["course_id"]),
+    )
+
+    objectives = _coerce_objectives_payload(activity["objectives"])
+    max_score = len(objectives)
+
+    rows = await pool.fetch(
+        """
+        SELECT
+            u.id::text                          AS student_id,
+            u.full_name                         AS student_name,
+            u.school_email                      AS student_email,
+            sap.current_score                   AS current_score,
+            sap.completed                       AS completed,
+            sap.last_question                   AS last_question,
+            sap.last_answer                     AS last_answer,
+            sap.last_interaction_at             AS last_interaction_at
+        FROM   student_course_mapping scm
+        JOIN   users u
+               ON  u.id = scm.student_id
+               AND u.role = 'student'
+        LEFT   JOIN student_activity_progress sap
+               ON  sap.student_id = u.id
+               AND sap.activity_id = $1
+        WHERE  scm.course_id = $2
+        ORDER  BY u.full_name ASC
+        """,
+        activity["id"],
+        activity["course_id"],
+    )
+
+    logs: list[dict] = []
+    for row in rows:
+        has_progress = row["current_score"] is not None
+        current_score = int(row["current_score"]) if has_progress else 0
+        completed = bool(row["completed"]) if has_progress else False
+
+        if completed:
+            completion_status = "Completed"
+        elif has_progress:
+            completion_status = "In Progress"
+        else:
+            completion_status = "Not Started"
+
+        last_interaction_at = row["last_interaction_at"]
+        last_interaction_str = (
+            last_interaction_at.isoformat()
+            if isinstance(last_interaction_at, datetime)
+            else None
+        )
+
+        logs.append(
+            {
+                "student_id": row["student_id"],
+                "student_name": row["student_name"] or row["student_email"],
+                "student_email": row["student_email"],
+                "activity_id": str(activity["id"]),
+                "activity_title": activity["title"],
+                "course_id": str(activity["course_id"]),
+                "current_score": current_score,
+                "max_score": max_score,
+                "completed": completed,
+                "completion_status": completion_status,
+                "last_question": row["last_question"],
+                "last_answer": row["last_answer"],
+                "last_interaction_at": last_interaction_str,
+            }
+        )
+
+    _STATUS_ORDER = {"Completed": 0, "In Progress": 1, "Not Started": 2}
+    logs.sort(key=lambda item: (_STATUS_ORDER.get(item["completion_status"], 9), item["student_name"]))
+    return logs
+
+
+async def getActivityCompletionLogs(
+    email: str,
+    password: str,
+    activity_id: str,
+) -> list[dict]:
+    """
+    @brief Returns completion log events for a specific activity.
+    @details Includes only completed actions and is ordered by most recent first.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+
+    if password:
+        await instructorLogin(email, password)
+
+    instructor = await fetch_registered_instructor_by_email(pool, email)
+
+    activity = await pool.fetchrow(
+        """
+        SELECT id, course_id, title
+        FROM   activities
+        WHERE  id::text = $1
+        LIMIT  1
+        """,
+        str(activity_id),
+    )
+
+    if activity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found.",
+        )
+
+    await _ensure_instructor_assigned_to_course(
+        pool,
+        str(instructor["id"]),
+        str(activity["course_id"]),
+    )
+
+    rows = await pool.fetch(
+        """
+        SELECT
+            aal.student_id::text AS student_id,
+            u.full_name          AS student_name,
+            u.school_email       AS student_email,
+            aal.action_type      AS action_type,
+            aal.created_at       AS created_at
+        FROM activity_action_logs aal
+        JOIN users u ON u.id = aal.student_id
+        WHERE aal.activity_id = $1
+          AND aal.action_type = 'COMPLETED'
+        ORDER BY aal.created_at DESC
+        """,
+        activity["id"],
+    )
+
+    return [
+        {
+            "student_id": row["student_id"],
+            "student_name": row["student_name"] or row["student_email"],
+            "student_email": row["student_email"],
+            "activity_id": str(activity["id"]),
+            "activity_title": activity["title"],
+            "course_id": str(activity["course_id"]),
+            "action_type": row["action_type"],
+            "created_at": row["created_at"].isoformat() if isinstance(row["created_at"], datetime) else None,
+        }
+        for row in rows
+    ]
+
 
 async def updateActivity(
     email: str, 
@@ -1206,8 +1591,21 @@ async def updateActivity(
     title: str | None = None
 ) -> dict:
     """
-    @brief Updates allowed fields of an activity (US-G).
-    @details Exact signature required by Phase 1 API Contract.
+    @brief Updates one or more editable fields of an existing activity.
+    @details At least one of activity_text, objectives, or title must be provided.
+             Only fields that are not None are written; others are left unchanged.
+             Instructor must be assigned to the course.
+    @param email School email of the authenticated instructor.
+    @param password Optional plain-text password for grading-script fallback auth.
+    @param course_id The course that owns the activity.
+    @param activity_no Activity number within the course.
+    @param activity_text Replacement activity description; None to leave unchanged.
+    @param objectives Replacement objectives list; None to leave unchanged.
+    @param title Replacement title (max 120 chars); None to leave unchanged.
+    @return Dictionary with keys: status, message.
+    @throws HTTPException 400 If all three fields are None.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 404 If the activity does not exist.
     """
     pool = db_pool
 
@@ -1219,14 +1617,12 @@ async def updateActivity(
 
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
 
-    # Criteria: Empty patch is rejected
     if activity_text is None and objectives is None and title is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Empty patch: At least one allowed field must be provided."
         )
 
-    # Build dynamic update query to only update provided fields
     updates = []
     values = [course_id, activity_no]
     idx = 3
@@ -1259,7 +1655,6 @@ async def updateActivity(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(query, *values)
 
-    # Criteria: Non-existent activity returns a clear error
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found.")
 
@@ -1279,8 +1674,22 @@ async def submitManualGrade(
     note: str = ""
 ) -> dict:
     """
-    @brief Submits a manual grade for a student in a specific activity (US-L).
-    @details Exact signature required by Phase 1 API Contract.
+    @brief Records a manual score override for a student on a specific activity.
+    @details Verifies instructor course authorization, activity existence and non-ENDED
+             status, student enrollment, and score range before upserting into
+             activity_scores with grading_type='manual'.
+    @param email School email of the authenticated instructor.
+    @param password Optional plain-text password for grading-script fallback auth.
+    @param course_id The course that owns the activity.
+    @param activity_no Activity number within the course.
+    @param student_email School email of the student receiving the grade.
+    @param score Numeric score to record; must be between 0 and activities.max_score.
+    @param note Optional free-text note stored alongside the grade.
+    @return Dictionary with keys: status, message.
+    @throws HTTPException 400 If score is outside the valid range.
+    @throws HTTPException 403 If instructor is not assigned to the course, activity is
+                             ENDED, or student is not enrolled in the course.
+    @throws HTTPException 404 If the activity or student does not exist.
     """
     pool = db_pool
 
@@ -1290,10 +1699,8 @@ async def submitManualGrade(
     instructor = await fetch_registered_instructor_by_email(pool, email)
     instructor_id = str(instructor["id"])
 
-    # Criteria: Unauthorized instructor cannot submit manual grade
     await _ensure_instructor_assigned_to_course(pool, instructor_id, course_id)
 
-    # Verify activity exists
     activity_query = "SELECT id, max_score, status FROM activities WHERE course_id::text = $1 AND activity_no = $2"
     async with pool.acquire() as conn:
         activity = await conn.fetchrow(activity_query, course_id, activity_no)
@@ -1307,24 +1714,20 @@ async def submitManualGrade(
             detail="Cannot submit manual grades for an ended or reset activity."
         )
 
-    # Verify student exists
     student = await fetch_registered_student_by_email(pool, student_email)
 
-    # Optional but recommended: Verify student is enrolled in the course
     enrolled_query = "SELECT 1 FROM student_course_mapping WHERE student_id = $1 AND course_id::text = $2"
     async with pool.acquire() as conn:
         is_enrolled = await conn.fetchrow(enrolled_query, student["id"], course_id)
         if not is_enrolled:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Student is not enrolled in this course.")
 
-    # Criteria: Validate score limits
     if score < 0 or score > activity["max_score"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail=f"Score must be between 0 and the activity maximum ({activity['max_score']})."
         )
 
-    # Criteria: Log manual grading event (upsert behavior)
     upsert_query = """
         INSERT INTO activity_scores (activity_id, student_id, score, grading_type, note)
         VALUES ($1, $2, $3, 'manual', $4)
@@ -1354,7 +1757,20 @@ async def _upsert_student_activity_progress(
     last_question: str | None,
     last_answer: str | None,
 ) -> None:
-    """Persist the current tutoring state for a student on a specific activity."""
+    """
+    @brief Inserts or updates a student_activity_progress row for the given student and activity.
+    @details Uses ON CONFLICT (student_id, activity_id) DO UPDATE to ensure exactly one row
+             per student per activity. Sets last_interaction_at and updated_at to NOW().
+    @param conn An active asyncpg connection; must be called inside an open transaction.
+    @param student_id Student user ID as a string.
+    @param course_id Course ID as a string; denormalized into the progress row.
+    @param activity_id Activity UUID as a string.
+    @param current_score Number of objectives the student has earned so far.
+    @param completed True when current_score equals the total number of objectives.
+    @param last_question The guidance question last shown to the student, or None.
+    @param last_answer The student's most recent submitted answer text, or None.
+    @return None.
+    """
     await conn.execute(
         """
         INSERT INTO student_activity_progress (
@@ -1386,6 +1802,36 @@ async def _upsert_student_activity_progress(
         bool(completed),
         last_question,
         last_answer,
+    )
+
+
+async def _log_activity_action(
+    conn: asyncpg.Connection,
+    student_id: str,
+    course_id: str,
+    activity_id: str,
+    action_type: str,
+) -> None:
+    """
+    @brief Records a student activity action event (e.g., COMPLETED).
+    @details Uses ON CONFLICT to ensure the same action is logged once per activity.
+    """
+    await conn.execute(
+        """
+        INSERT INTO activity_action_logs (
+            student_id,
+            course_id,
+            activity_id,
+            action_type
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (student_id, activity_id, action_type)
+        DO NOTHING
+        """,
+        student_id,
+        course_id,
+        activity_id,
+        action_type,
     )
 
 
@@ -1445,7 +1891,6 @@ async def getStudentActivity(
         else None
     )
 
-    # US-J: the first tutoring response includes activity text and exactly one question.
     if not objectives:
         next_question = (
             "What is one clear, objective-focused explanation you can provide for this activity?"
@@ -1471,11 +1916,91 @@ async def getStudentActivity(
         "completed": completed,
         "next_question": next_question if not completed else None,
     }
+
+
+async def _fetch_activity_reference_by_id(
+    pool: asyncpg.Pool,
+    activity_id: str,
+) -> tuple[str, int]:
+    """
+    @brief Resolves an activity UUID to its course_id and activity_no.
+    @throws HTTPException 404 if activity does not exist.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT course_id::text AS course_id, activity_no
+        FROM activities
+        WHERE id::text = $1
+        LIMIT 1
+        """,
+        str(activity_id),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Activity not found.")
+    return str(row["course_id"]), int(row["activity_no"])
+
+
+async def getStudentActivityById(
+    email: str,
+    password: str,
+    activity_id: str,
+) -> dict:
+    """
+    @brief Wrapper for getStudentActivity using activity UUIDs.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+    course_id, activity_no = await _fetch_activity_reference_by_id(pool, activity_id)
+    return await getStudentActivity(
+        email=email,
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+    )
+
+
+async def submitAnswerByActivityId(
+    email: str,
+    password: str,
+    activity_id: str,
+    answer: str,
+) -> dict:
+    """
+    @brief Wrapper for submitAnswer using activity UUIDs.
+    """
+    pool = db_pool
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized.",
+        )
+    course_id, activity_no = await _fetch_activity_reference_by_id(pool, activity_id)
+    return await submitAnswer(
+        email=email,
+        password=password,
+        course_id=course_id,
+        activity_no=activity_no,
+        answer=answer,
+    )
 async def resetActivity(
     email: str, password: str, course_id: str, activity_no: int
 ) -> dict:
     """
-    @brief Resets an activity and deletes scores (US-M).
+    @brief Deletes all student scores for an activity and sets its status to ENDED.
+    @details Removes rows from objective_score_logs, activity_scores, and
+             student_activity_progress in a single transaction. The activity
+             status becomes ENDED, not DRAFT; it cannot be restarted after reset.
+    @param email School email of the authenticated instructor.
+    @param password Optional plain-text password for grading-script fallback auth.
+    @param course_id The course that owns the activity.
+    @param activity_no Activity number within the course.
+    @return Dictionary with keys: status, message.
+    @throws HTTPException 403 If instructor is not assigned to the course.
+    @throws HTTPException 404 If the activity does not exist.
     """
     pool = db_pool
     if password: await instructorLogin(email, password)
@@ -1487,6 +2012,7 @@ async def resetActivity(
             if not activity: raise HTTPException(404, detail="Not found.")
             await conn.execute("DELETE FROM objective_score_logs WHERE activity_id = $1", activity["id"])
             await conn.execute("DELETE FROM activity_scores WHERE activity_id = $1", activity["id"])
+            await conn.execute("DELETE FROM activity_action_logs WHERE activity_id = $1", activity["id"])
             await conn.execute("DELETE FROM student_activity_progress WHERE activity_id = $1", activity["id"])
             await conn.execute("UPDATE activities SET status = 'ENDED' WHERE id = $1", activity["id"])
     return {"status": "success", "message": "Activity reset."}
@@ -1494,7 +2020,13 @@ async def listActivities(
     email: str, password: str, course_id: str
 ) -> dict:
     """
-    @brief Lists activities in a selected course (US-E).
+    @brief Returns all activities for a course the instructor is assigned to.
+    @param email School email of the authenticated instructor.
+    @param password Optional plain-text password for grading-script fallback auth.
+    @param course_id The course to query.
+    @return Dictionary with key "activities"; value is a list of objects each containing
+            activity_id, activity_no, title, and status. Ordered by activity_no ascending.
+    @throws HTTPException 403 If instructor is not assigned to the course.
     """
     pool = db_pool
     if password: await instructorLogin(email, password)
@@ -1503,3 +2035,80 @@ async def listActivities(
     rows = await pool.fetch("SELECT id, activity_no, title, description, status FROM activities WHERE course_id::text = $1 ORDER BY activity_no ASC", course_id)
     activities = [{"activity_id": str(r["id"]), "activity_no": r["activity_no"], "title": r["title"], "status": r["status"]} for r in rows]
     return {"activities": activities}
+
+
+async def getStudentCourses(email: str) -> list[dict]:
+    """
+    @brief Returns all courses a student is enrolled in, with per-activity progress.
+    @details Queries student_course_mapping for enrolled courses, then for each course
+             LEFT JOINs activities against student_activity_progress to include
+             current_score and completed even when no progress row exists yet.
+    @param email School email of the authenticated student.
+    @return List of course dicts each containing: course_id, course_code, course_name,
+            and activities (list of activity_id, activity_no, title, description,
+            status, current_score, completed).
+    @throws HTTPException 404 If no student account exists for the given email.
+    """
+    pool = db_pool
+    student = await fetch_registered_student_by_email(pool, email)
+    student_id = student["id"]
+
+    course_rows = await pool.fetch(
+        """
+        SELECT c.id, c.course_code, c.course_name
+        FROM   courses c
+        JOIN   student_course_mapping scm ON scm.course_id = c.id
+        WHERE  scm.student_id = $1
+        ORDER  BY c.course_name ASC
+        """,
+        student_id,
+    )
+
+    courses: list[dict] = []
+    for course in course_rows:
+        course_id = str(course["id"])
+
+        activity_rows = await pool.fetch(
+            """
+            SELECT
+                a.id,
+                a.activity_no,
+                a.title,
+                a.description,
+                a.status,
+                sap.current_score,
+                sap.completed
+            FROM   activities a
+            LEFT   JOIN student_activity_progress sap
+                   ON  sap.activity_id = a.id
+                   AND sap.student_id  = $1
+            WHERE  a.course_id::text = $2
+            ORDER  BY a.activity_no ASC
+            """,
+            student_id,
+            course_id,
+        )
+
+        activities = [
+            {
+                "activity_id":   str(r["id"]),
+                "activity_no":   r["activity_no"],
+                "title":         r["title"],
+                "description":   r["description"],
+                "status":        r["status"],
+                "current_score": int(r["current_score"]) if r["current_score"] is not None else 0,
+                "completed":     bool(r["completed"]) if r["completed"] is not None else False,
+            }
+            for r in activity_rows
+        ]
+
+        courses.append(
+            {
+                "course_id":   course_id,
+                "course_code": course["course_code"],
+                "course_name": course["course_name"],
+                "activities":  activities,
+            }
+        )
+
+    return courses

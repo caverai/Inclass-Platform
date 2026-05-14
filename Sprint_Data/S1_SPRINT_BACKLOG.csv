@@ -1,0 +1,7 @@
+Story ID,Title,Description,Assigned To,Status,Start Date,End Date,Estimate (SP)
+US-A,Instructor Sign-In,Implement Google Token verification & federated login for instructors,Necati Onur Yaman,To Do,2026-04-26,2026-04-26,5
+US-B,Student Sign-In,Implement student federated login and handle unmapped edge cases,Başar Metin,To Do,2026-04-26,2026-04-26,5
+US-C,Role and Course Mapping,"Implement DB schema, JWT mapping, and strict role middleware",Ceyda Akgün,To Do,2026-04-26,2026-04-28,11
+US-D,List Assigned Courses,Implement complex DB join and GET /instructor/courses endpoint,Mustafa Garip,To Do,2026-04-29,2026-05-01,4
+TECH-1,Add Doxygen Documentation,Configure Doxyfile and standardize Python docstrings,Mustafa Garip,To Do,2026-04-30,2026-04-30,3
+US-H,Start and End Activity,Add state constraints (ACTIVE/ENDED) and toggle endpoints,Aksel Uğur,To Do,2026-05-01,2026-05-04,7

@@ -1,88 +1,13 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>InClass Platform Frontend</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/frontend/styles.css" />
-</head>
-<body>
-  <div class="background-shape bg-a"></div>
-  <div class="background-shape bg-b"></div>
-
-  <main class="shell">
-    <header class="hero">
-      <p class="eyebrow">INCLASS PLATFORM</p>
-      <h1>Activity Control and Tutoring Console</h1>
-      <p class="subtitle">A practical interface to run your backend stories end-to-end during demo.</p>
-    </header>
-
-    <section class="auth-card card">
-      <div class="mode-switch" role="tablist" aria-label="User role">
-        <button id="mode-instructor" class="mode-btn active" type="button" role="tab" aria-selected="true">Instructor</button>
-        <button id="mode-student" class="mode-btn" type="button" role="tab" aria-selected="false">Student</button>
-      </div>
-
-      <div class="form-grid">
-        <label>
-          Email
-          <input id="email" type="email" placeholder="name@mef.edu.tr" autocomplete="username" />
-        </label>
-        <label>
-          Password
-          <input id="password" type="password" placeholder="Your password" autocomplete="current-password" />
-        </label>
-      </div>
-
-      <div class="action-row">
-        <button id="signin" class="primary" type="button">Sign In</button>
-        <button id="signout" class="ghost" type="button">Sign Out</button>
-        <span id="auth-state" class="status-pill">Not signed in</span>
-      </div>
-    </section>
-
-    <section class="panel-grid">
-      <article class="card">
-        <h2>Instructor Controls</h2>
-        <div class="row">
-          <button id="load-courses" type="button">Load Courses</button>
-          <input id="course-id" type="text" placeholder="course_id" />
-          <button id="load-activities" type="button">Load Activities</button>
-        </div>
-        <div class="row">
-          <input id="activity-no" type="number" placeholder="activity_no" min="1" />
-          <button id="start-activity" type="button">Start</button>
-          <button id="end-activity" type="button">End</button>
-          <button id="reset-activity" type="button">Reset</button>
-        </div>
-      </article>
-
-      <article class="card">
-        <h2>Student Tutoring</h2>
-        <div class="row">
-          <input id="student-course-id" type="text" placeholder="course_id" />
-          <input id="student-activity-no" type="number" placeholder="activity_no" min="1" />
-          <button id="fetch-activity" type="button">Fetch Active Activity</button>
-        </div>
-        <div class="row">
-          <input id="student-answer" type="text" placeholder="Type your answer" />
-          <button id="submit-answer" type="button">Submit Answer</button>
-        </div>
-      </article>
-    </section>
-
-    <section class="card log-card">
-      <div class="log-header">
-        <h2>Live API Output</h2>
-        <button id="clear-log" class="ghost" type="button">Clear</button>
-      </div>
-      <pre id="output"></pre>
-    </section>
-  </main>
-
-  <script src="/frontend/app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

@@ -1,0 +1,103 @@
+import React, { useEffect, useState } from 'react';
+import { Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { LogOut, BookOpen } from 'lucide-react';
+import { authApi } from '../api/authApi';
+import type { User } from '../types';
+import { DEMO_ROLE_KEY, DEMO_USER_KEY } from '../utils/demoAuth';
+
+const getRequiredRole = (path: string): User['role'] | null => {
+  if (path.startsWith('/instructor')) return 'INSTRUCTOR';
+  if (path.startsWith('/student')) return 'STUDENT';
+  return null;
+};
+
+const getHomePath = (role: User['role']) => {
+  if (role === 'INSTRUCTOR') return '/instructor/dashboard';
+  if (role === 'STUDENT') return '/student/dashboard';
+  return '/login';
+};
+
+export const Layout: React.FC = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [user, setUser] = useState<User | null>(null);
+
+  const publicPaths = ['/student/login', '/student/register', '/instructor/login', '/login'];
+  const isPublicPath = publicPaths.includes(location.pathname);
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const currentUser = await authApi.getMe();
+        const requiredRole = getRequiredRole(location.pathname);
+
+        if (requiredRole && currentUser.role !== requiredRole) {
+          setUser(currentUser);
+          navigate(getHomePath(currentUser.role), { replace: true });
+          return;
+        }
+
+        setUser(currentUser);
+      } catch {
+        if (!isPublicPath) {
+          navigate('/student/login', { replace: true });
+        }
+      }
+    };
+    
+    if (!isPublicPath) {
+      fetchUser();
+    }
+  }, [navigate, location.pathname, isPublicPath]);
+
+  const handleLogout = () => {
+    localStorage.removeItem('instructor_token');
+    localStorage.removeItem('student_token');
+    localStorage.removeItem('demo_token'); // clear any legacy key
+    localStorage.removeItem(DEMO_ROLE_KEY);
+    localStorage.removeItem(DEMO_USER_KEY);
+    navigate('/student/login');
+  };
+
+  if (isPublicPath) {
+    return <Outlet />;
+  }
+
+  const requiredRole = getRequiredRole(location.pathname);
+  if (user && requiredRole && user.role !== requiredRole) {
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  }
+
+  if (!user) {
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      <header className="bg-indigo-600 text-white shadow-md">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center space-x-3 cursor-pointer" onClick={() => navigate(getHomePath(user.role))}>
+            <BookOpen className="w-6 h-6" />
+            <span className="font-bold text-xl tracking-tight">InClass</span>
+          </div>
+          <div className="flex items-center space-x-4">
+            <div className="flex flex-col items-end">
+              <span className="text-sm font-medium">{user.name}</span>
+              <span className="text-xs text-indigo-200">{user.role}</span>
+            </div>
+            <button 
+              onClick={handleLogout}
+              className="p-2 rounded-full hover:bg-indigo-700 transition-colors focus:outline-none focus:ring-2 focus:ring-white"
+              title="Logout"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      </header>
+      <main className="flex-grow max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
+        <Outlet />
+      </main>
+    </div>
+  );
+};

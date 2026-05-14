@@ -19,6 +19,7 @@ load_dotenv()
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -35,8 +36,6 @@ from app.services import (
     createActivity,
     create_access_token,
     endActivity,
-    fetch_instructor_courses,
-    fetch_password_hash_by_email,
     fetch_registered_instructor_by_email,
     fetch_registered_student_by_email,
     fetch_user_by_email,
@@ -44,14 +43,20 @@ from app.services import (
     instructorLogin,
     listActivities,
     listMyCourses,
+    registerStudent,
+    resetActivity,
     setInstructorPassword,
     startActivity,
+    studentLogin,
     submitAnswer,
-    update_user_password,
     updateActivity,
     submitManualGrade,
     getStudentActivity,
-    resetActivity,
+    getActivityLogs,
+    getStudentCourses,
+    getActivityCompletionLogs,
+    getStudentActivityById,
+    submitAnswerByActivityId,
 )
 
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
@@ -66,7 +71,7 @@ logger = logging.getLogger("inclass.auth")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup işlemleri ---
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=0, max_size=10)
     app.state.db_pool = pool
     services.db_pool = pool
     logger.info("Database connection pool created.")
@@ -83,6 +88,14 @@ app = FastAPI(
     description="Google Federated Sign-In with role-based access",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
@@ -114,6 +127,25 @@ class AuthResponse(BaseModel):
     user_id: str
     role: str
     email: str
+    name: Optional[str] = None
+
+
+class StudentRegisterRequest(BaseModel):
+    """
+    @brief Request model for student registration.
+    """
+    full_name: str
+    email: str
+    password: str
+    confirm_password: str
+
+
+class StudentLoginRequest(BaseModel):
+    """
+    @brief Request model for student login.
+    """
+    email: str
+    password: str
 
 
 class InstructorLoginRequest(BaseModel):
@@ -170,6 +202,12 @@ class SubmitAnswerRequest(BaseModel):
     course_id: str
     activity_no: int
     answer: str
+
+
+class StudentChatRequest(BaseModel):
+    """Request model for student chat answers via activity id."""
+    answer: str
+    password: Optional[str] = None
 
 
 
@@ -526,6 +564,11 @@ async def verify_instructor(
     tags=["Authorization"],
 )
 async def student_test(current_user: dict = Depends(verify_student)) -> dict:
+    """
+    @brief Verifies that the Bearer token belongs to a student.
+    @param current_user Authenticated student identity injected by verify_student.
+    @return Dictionary with keys: access, email, role.
+    """
     return {
         "access": "student",
         "email": current_user["email"],
@@ -553,6 +596,62 @@ async def api_submit_answer(
         activity_no=body.activity_no,
         answer=body.answer,
     )
+
+
+@app.get(
+    "/student/activities/{activity_id}",
+    summary="Get activity details by activity id",
+    tags=["Student"],
+)
+async def api_get_student_activity_by_id(
+    activity_id: str,
+    current_user: dict = Depends(verify_student),
+) -> dict:
+    """
+    @brief Returns the activity payload and progress using the activity UUID.
+    """
+    return await getStudentActivityById(
+        email=current_user["email"],
+        password="",
+        activity_id=activity_id,
+    )
+
+
+@app.post(
+    "/student/activities/{activity_id}/chat",
+    summary="Submit an answer for an activity by id",
+    tags=["Student"],
+)
+async def api_submit_answer_by_id(
+    activity_id: str,
+    body: StudentChatRequest,
+    current_user: dict = Depends(verify_student),
+) -> dict:
+    """
+    @brief Scores a student answer using the activity UUID.
+    """
+    return await submitAnswerByActivityId(
+        email=current_user["email"],
+        password=body.password or "",
+        activity_id=activity_id,
+        answer=body.answer,
+    )
+
+
+@app.get(
+    "/student/courses",
+    summary="List enrolled courses with activities for the current student",
+    tags=["Student"],
+)
+async def api_get_student_courses(
+    current_user: dict = Depends(verify_student),
+) -> list[dict]:
+    """
+    @brief Returns courses the authenticated student is enrolled in, with activity list.
+    @details Each course includes activities and the student's current progress
+             (score, completed) pulled from student_activity_progress.
+    """
+    return await getStudentCourses(email=current_user["email"])
 
 
 @app.get(
@@ -586,6 +685,11 @@ async def api_get_student_activity(
     tags=["Authorization"],
 )
 async def instructor_test(current_user: dict = Depends(verify_instructor)) -> dict:
+    """
+    @brief Verifies that the Bearer token belongs to an instructor.
+    @param current_user Authenticated instructor identity injected by verify_instructor.
+    @return Dictionary with keys: access, email, role.
+    """
     return {
         "access": "instructor",
         "email": current_user["email"],
@@ -648,7 +752,60 @@ async def api_instructor_login(
             detail="Email and password are required.",
         )
 
-    result = await instructorLogin(email=email, password=password)
+    return await instructorLogin(email, password)
+
+
+@app.post(
+    "/student/register",
+    response_model=AuthResponse,
+    summary="Student self-registration",
+    tags=["Authentication"],
+)
+async def api_student_register(body: StudentRegisterRequest) -> AuthResponse:
+    """
+    @brief Registers a new student.
+    """
+    if body.password != body.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match."
+        )
+    
+    if not body.full_name or not body.email or not body.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="All fields are required."
+        )
+
+    enforce_school_email(body.email)
+    
+    result = await registerStudent(
+        email=body.email,
+        password=body.password,
+        full_name=body.full_name
+    )
+    return AuthResponse(**result)
+
+
+@app.post(
+    "/student/login",
+    response_model=AuthResponse,
+    summary="Student password-based login",
+    tags=["Authentication"],
+)
+async def api_student_login(body: StudentLoginRequest) -> AuthResponse:
+    """
+    @brief Validates student credentials and issues a JWT.
+    """
+    if not body.email or not body.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email and password are required.",
+        )
+
+    enforce_school_email(body.email)
+    
+    result = await studentLogin(email=body.email, password=body.password)
     return AuthResponse(**result)
 
 
@@ -863,6 +1020,54 @@ async def api_reset_activity(
         password=password,
         course_id=course_id,
         activity_no=activity_no,
+    )
+
+
+@app.get(
+    "/instructor/activities/{activity_id}/logs",
+    summary="Get activity scoring logs",
+    tags=["Instructor"],
+)
+async def api_get_activity_logs(
+    request: Request,
+    activity_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> list[dict]:
+    """
+    @brief Returns student-specific scoring and completion logs for an activity.
+    @details Requires instructor authorization and restricts access to activities
+             in courses assigned to the authenticated instructor.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await getActivityLogs(
+        email=current_user["email"],
+        password=password,
+        activity_id=activity_id,
+    )
+
+
+@app.get(
+    "/instructor/activities/{activity_id}/completion-logs",
+    summary="Get activity completion logs",
+    tags=["Instructor"],
+)
+async def api_get_activity_completion_logs(
+    request: Request,
+    activity_id: str,
+    current_user: dict = Depends(verify_instructor),
+) -> list[dict]:
+    """
+    @brief Returns completion events for a specific activity.
+    """
+    fallback_creds = await _extract_grading_fallback_credentials(request)
+    password = fallback_creds.get("password", "")
+
+    return await getActivityCompletionLogs(
+        email=current_user["email"],
+        password=password,
+        activity_id=activity_id,
     )
 
 
