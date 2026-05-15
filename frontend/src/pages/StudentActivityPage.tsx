@@ -158,8 +158,15 @@ export const StudentActivityPage: React.FC = () => {
         response.miniLesson,
         response.completed,
       );
+      // If the backend returned a next question, show it as a separate tutor bubble
+      // so it's visually distinct from the feedback message and won't be duplicated
+      // on page reload (where it comes in via chatHistory instead).
+      const newMessages: typeof tutorMessage[] = [tutorMessage];
+      if (response.nextQuestion && !response.completed) {
+        newMessages.push(createTutorMessage(`Question: ${response.nextQuestion}`));
+      }
 
-      setMessages((currentMessages) => [...currentMessages, tutorMessage]);
+      setMessages((currentMessages) => [...currentMessages, ...newMessages]);
       setActivity((currentActivity) =>
         currentActivity
           ? {

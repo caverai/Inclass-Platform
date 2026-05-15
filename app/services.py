@@ -45,8 +45,8 @@ async def call_deepseek_api(system_prompt: str, user_prompt: str) -> dict:
             {"role": "user", "content": user_prompt}
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": 150,
-        "temperature": 0.3
+        "max_tokens": 512,
+        "temperature": 0.1
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -56,24 +56,27 @@ async def call_deepseek_api(system_prompt: str, user_prompt: str) -> dict:
             if e.response.status_code == 429:
                 logger.warning("DeepSeek API rate limit exceeded (429). Falling back to basic logic.")
                 return {}
-            raise
-        except Exception as e:
-            logger.warning(f"DeepSeek API error: {e}")
+            logger.error(f"DeepSeek API HTTP error {e.response.status_code}: {e.response.text}")
             return {}
-            
+        except Exception as e:
+            logger.error(f"DeepSeek API connection error: {e}")
+            return {}
+
         data = res.json()
         if "choices" not in data or not data["choices"]:
+            logger.warning("DeepSeek API returned no choices.")
             return {}
-            
+
         text = data["choices"][0]["message"]["content"]
-        # sometimes LLMs wrap json in ```json ... ```
+        # sometimes LLMs wrap json in ```json ... ``` despite json_object mode
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
         elif "```" in text:
             text = text.split("```")[1].strip()
         try:
             return json.loads(text)
-        except Exception:
+        except Exception as e:
+            logger.error(f"DeepSeek API failed to parse JSON response: {e}. Content: {text}")
             return {}
 
 
@@ -82,8 +85,10 @@ _AUTO_SCORING_STOP_WORDS = {
     "from", "has", "have", "how", "in", "into", "is", "it", "its", "of",
     "on", "or", "that", "the", "their", "then", "there", "these", "this",
     "to", "was", "were", "what", "when", "where", "which", "why", "will",
-    "with", "your", "define", "describe", "explain", "identify",
-    "understand", "use", "using",
+    "with", "your",
+    # Note: verbs like "explain", "describe", "define", "identify" are intentionally
+    # kept out of this list — they often appear in objective text and student answers,
+    # and stripping them weakens fallback keyword matching.
 }
 
 
@@ -737,24 +742,34 @@ async def _find_new_objective_achievement(
         return None
         
     system_prompt = (
-        "You are a supportive teacher. Given an Activity, a Student Answer, and a list of unearned Objectives, "
-        "determine if the student answer newly satisfies any of the objectives. "
-        "Output ONLY valid JSON with no markdown formatting. The format MUST be: "
-        "{\"achieved_index\": <integer or null>, \"matched_words\": [\"word1\", \"word2\"]}. "
-        "If none are satisfied, return {\"achieved_index\": null, \"matched_words\": []}. "
-        "matched_words should be a few key concepts from the answer that proved the objective."
+        "You are a fair and encouraging teacher scoring a student's chat response. "
+        "Read the Activity carefully — it defines what counts as a correct answer. "
+        "Then check if the Student Answer satisfies any of the listed Objectives. "
+        "Be generous: if the student's answer shows they understand the concept — even partially, "
+        "informally, or in their own words — mark it as achieved. "
+        "Only reject if the answer is clearly off-topic, nonsensical, or completely wrong. "
+        "Output ONLY valid JSON: {\"achieved_index\": <int or null>, \"matched_words\": [\"word1\", ...]}. "
+        "matched_words should be the key words from the student's answer that show understanding."
+    )
+
+    objectives_str = "\n".join(f"{i}: {objectives[i]}" for i in unearned_indexes)
+    user_prompt = (
+        f"Activity:\n{activity_text}\n\n"
+        f"Objectives to check (unearned):\n{objectives_str}\n\n"
+        f"Student Answer: {answer}"
     )
     
-    objectives_str = "\\n".join(f"{i}: {objectives[i]}" for i in unearned_indexes)
-    user_prompt = f"Activity: {activity_text}\\n\\nObjectives:\\n{objectives_str}\\n\\nStudent Answer: {answer}"
-    
     res = await call_deepseek_api(system_prompt, user_prompt)
-    achieved = res.get("achieved_index")
-    
-    if achieved is not None and achieved in unearned_indexes:
-        return achieved, objectives[achieved], res.get("matched_words", [])
-    
-    # Fallback to simple matching if LLM fails
+
+    if res:
+        achieved = res.get("achieved_index")
+        if achieved is not None and isinstance(achieved, int) and achieved in unearned_indexes:
+            return achieved, objectives[achieved], res.get("matched_words", [])
+        # DeepSeek responded but said no objective was achieved — trust it
+        return None
+
+    # DeepSeek call failed entirely (timeout, network, bad JSON) — fall back to keyword matching
+    logger.info("DeepSeek API call failed. Using keyword matching fallback.")
     answer_words = _meaningful_words(answer)
     for objective_index in unearned_indexes:
         objective_words = _meaningful_words(objectives[objective_index])
@@ -779,17 +794,34 @@ def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) 
     return f"Mini-lesson: '{objective_text}' satisfied. Good job!"
 
 
-async def _next_objective_question(objective_text: str, activity_text: str = "", previous_answer: str = "") -> str:
+async def _next_objective_question(
+    target_objective: str, 
+    activity_text: str = "", 
+    previous_answer: str = "",
+    achieved_objective: Optional[str] = None
+) -> str:
     """
     @brief Returns an AI-generated guidance question to steer the student toward the next objective.
     """
     system_prompt = (
-        "You are a helpful AI tutor. Ask a short, engaging, single question to guide the student "
-        "to fulfill the target objective for the given activity. Do NOT reveal the exact objective text, "
-        "instead ask a thought-provoking question to elicit it. Output ONLY a JSON object: {\"question\": \"...\"}."
+        "You are a friendly tutor helping a student work through an activity. "
+        "Your job is to ask ONE short, specific question that nudges the student toward the Target Objective. "
+        "Rules:\n"
+        "- Read the Activity text carefully. Your question must reference specific content from it.\n"
+        "- Do NOT ask generic questions like 'what do you think?' or 'can you elaborate?'.\n"
+        "- Do NOT reveal the objective word-for-word. Instead ask about the concept behind it.\n"
+        "- Keep it conversational and encouraging, not formal or academic.\n"
+        "- If the student's previous answer was close, acknowledge it and ask them to be more specific.\n"
+        "- If they just earned a point, give a short warm compliment then ask about the next concept.\n"
+        "Output ONLY a JSON object: {\"question\": \"...\"}."
     )
-    
-    user_prompt = f"Activity: {activity_text}\\n\\nTarget Objective: {objective_text}\\n\\nPrevious Student Answer: {previous_answer}"
+
+    user_prompt = f"Activity content:\n{activity_text}\n\n"
+    if achieved_objective:
+        user_prompt += f"The student just correctly answered: {achieved_objective}\n"
+    user_prompt += f"Next concept to guide them toward: {target_objective}\n"
+    if previous_answer:
+        user_prompt += f"Student's last answer: {previous_answer}"
     
     res = await call_deepseek_api(system_prompt, user_prompt)
     question = res.get("question")
@@ -1183,7 +1215,7 @@ async def submitAnswer(
         async with conn.transaction():
             activity = await conn.fetchrow(
                 """
-                SELECT id, course_id, activity_no, objectives, status
+                SELECT id, course_id, activity_no, objectives, status, description
                 FROM   activities
                 WHERE  course_id::text = $1
                   AND  activity_no = $2
@@ -1252,8 +1284,9 @@ async def submitAnswer(
                     ),
                     "completed": True,
                     "next_question": None,
+                    "status": activity_status,
                 }
-                
+
             if clean_answer == "<mark-as-completed>":
                 unearned_indexes = [i for i in range(len(objectives)) if i not in earned_indexes]
                 for idx in unearned_indexes:
@@ -1293,6 +1326,7 @@ async def submitAnswer(
                     "message": "Activity marked as completed.",
                     "completed": True,
                     "next_question": None,
+                    "status": activity_status,
                 }
 
             achievement = await _find_new_objective_achievement(
@@ -1308,7 +1342,11 @@ async def submitAnswer(
                     None,
                 )
                 next_question = (
-                    await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""), clean_answer)
+                    await _next_objective_question(
+                        target_objective=objectives[next_unearned_index], 
+                        activity_text=activity.get("description", ""), 
+                        previous_answer=clean_answer
+                    )
                     if next_unearned_index is not None
                     else None
                 )
@@ -1331,6 +1369,7 @@ async def submitAnswer(
                     ),
                     "completed": False,
                     "next_question": next_question,
+                    "status": activity_status,
                 }
 
             objective_index, objective_text, matched_words = achievement
@@ -1391,7 +1430,11 @@ async def submitAnswer(
                     None,
                 )
                 next_question = (
-                    await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""), clean_answer)
+                    await _next_objective_question(
+                        target_objective=objectives[next_unearned_index], 
+                        activity_text=activity.get("description", ""), 
+                        previous_answer=clean_answer
+                    )
                     if next_unearned_index is not None
                     else None
                 )
@@ -1427,6 +1470,7 @@ async def submitAnswer(
                     ),
                     "completed": completed,
                     "next_question": None if completed else next_question,
+                    "status": activity_status,
                 }
 
             total_score = int(inserted["total_score"])
@@ -1464,7 +1508,12 @@ async def submitAnswer(
                 None,
             )
             next_question = (
-                await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""), clean_answer)
+                await _next_objective_question(
+                    target_objective=objectives[next_unearned_index], 
+                    activity_text=activity.get("description", ""), 
+                    previous_answer=clean_answer,
+                    achieved_objective=objective_text
+                )
                 if next_unearned_index is not None
                 else None
             )
@@ -1478,11 +1527,12 @@ async def submitAnswer(
                     matched_words,
                 ),
                 "message": (
-                    "Great work, you earned +1 point. "
+                    f"Great work! You've successfully demonstrated understanding of: {objective_text}. "
                     f"Your score is now {total_score}."
                 ),
                 "completed": completed,
                 "next_question": None if completed else next_question,
+                "status": activity_status,
             }
 
             if completed:
@@ -2593,6 +2643,7 @@ async def deleteCourse(
             "DELETE FROM courses WHERE id::text = $1",
             course_id,
         )
+
 
     if result == "DELETE 0":
         raise HTTPException(

@@ -476,8 +476,12 @@ const normalizeChatResponse = (raw: Record<string, unknown>): StudentChatRespons
   const nextQuestion = raw.nextQuestion ?? raw.next_question ?? null;
   const status = normalizeStatus(raw.status) ?? 'ACTIVE';
 
+  // Keep tutorMessage as just the feedback text. The question is stored separately
+  // in nextQuestion and injected as its own tutor bubble by StudentActivityPage,
+  // so embedding it here would show it twice (once in the feedback bubble and once
+  // as a standalone bubble on the next render/reload).
   return {
-    tutorMessage: nextQuestion && !completed ? `${message}\n\nQuestion: ${String(nextQuestion)}` : message,
+    tutorMessage: message,
     score,
     scoreDelta: Number(raw.scoreDelta ?? raw.score_delta ?? 0),
     completed,
