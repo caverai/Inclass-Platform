@@ -45,7 +45,7 @@ async def call_deepseek_api(system_prompt: str, user_prompt: str) -> dict:
             {"role": "user", "content": user_prompt}
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": 512,
+        "max_tokens": 8192,
         "temperature": 0.1
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -86,10 +86,24 @@ _AUTO_SCORING_STOP_WORDS = {
     "on", "or", "that", "the", "their", "then", "there", "these", "this",
     "to", "was", "were", "what", "when", "where", "which", "why", "will",
     "with", "your",
-    # Note: verbs like "explain", "describe", "define", "identify" are intentionally
-    # kept out of this list — they often appear in objective text and student answers,
-    # and stripping them weakens fallback keyword matching.
 }
+
+# Instruction verbs that appear in objective text ("Explain X", "Differentiate between X")
+# but never in student answers — excluding them from objective keyword extraction prevents
+# false negatives in the keyword fallback scorer.
+_OBJECTIVE_INSTRUCTION_VERBS = {
+    "explain", "describe", "define", "identify", "differentiate", "compare",
+    "contrast", "list", "state", "outline", "summarize", "discuss", "analyse",
+    "analyze", "evaluate", "demonstrate", "illustrate", "calculate", "determine",
+    "justify", "classify", "distinguish", "interpret", "predict", "apply",
+    "between", "use", "give", "name", "write", "show", "find", "how", "why",
+    "what", "when", "where", "who",
+}
+
+# Derivational/inflectional suffixes stripped for stemming (longest first).
+_STEM_DERIVATIONAL = ("ations", "ation", "ings", "ness", "ment", "tion", "ing", "ied", "ed", "er", "ly", "al")
+# Sibilant plural endings where the full "es" is stripped (e.g. boxes→box, catches→catch).
+_STEM_SIBILANT_ES = ("xes", "zes", "ches", "shes", "sses")
 
 
 class PasswordHasher:
@@ -692,19 +706,70 @@ def _coerce_objectives_payload(objectives: object) -> list[str]:
     ]
 
 
+def _stem(word: str) -> str:
+    """
+    @brief Applies a simple suffix-stripping stem to a word.
+    @details Not a full Porter stemmer — just removes the most common English
+             inflectional/derivational suffixes so that plural and conjugated
+             forms match their base form during keyword scoring.
+             Example: "cases" → "case", "suites" → "suite", "catching" → "catch".
+    @param word A lowercase alphanumeric token.
+    @return The stemmed form; original word if no suffix matches or result is too short.
+    """
+    # 1. Derivational suffixes (longest first to avoid partial stripping)
+    for suffix in _STEM_DERIVATIONAL:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    # 2. Sibilant plurals: strip full "es" (boxes→box, catches→catch)
+    for ending in _STEM_SIBILANT_ES:
+        if word.endswith(ending) and len(word) - 2 >= 3:
+            return word[:-2]
+    # 3. Regular "es" plurals: strip only "s" so cases→case, suites→suite
+    if word.endswith("es") and len(word) - 1 >= 3:
+        return word[:-1]
+    # 4. "ies" plurals: carry→carries; strip "ies" add "y"
+    if word.endswith("ies") and len(word) - 3 >= 3:
+        return word[:-3] + "y"
+    # 5. Simple "s" plural
+    if word.endswith("s") and not word.endswith("ss") and len(word) - 1 >= 3:
+        return word[:-1]
+    return word
+
+
 def _meaningful_words(text: str) -> set[str]:
     """
-    @brief Extracts meaningful words from text for objective matching.
-    @details Lowercases, strips punctuation, splits on whitespace, and removes
-             stop words and tokens shorter than 3 characters.
-    @param text Raw answer or objective string.
-    @return Set of normalized content words; empty set if text is blank.
+    @brief Extracts stemmed meaningful words from a student answer for objective matching.
+    @details Lowercases, strips punctuation, splits on whitespace, removes stop words
+             and tokens shorter than 3 characters, then applies basic suffix stemming
+             so that inflected forms (plural, past tense, gerund) match their base form.
+    @param text Raw answer string.
+    @return Set of stemmed content words; empty set if text is blank.
     """
     normalized = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
     return {
-        word
+        _stem(word)
         for word in normalized.split()
         if len(word) > 2 and word not in _AUTO_SCORING_STOP_WORDS
+    }
+
+
+def _meaningful_words_from_objective(text: str) -> set[str]:
+    """
+    @brief Extracts stemmed meaningful words from an objective string for keyword matching.
+    @details Same as _meaningful_words but additionally strips instruction verbs
+             (e.g. 'differentiate', 'explain', 'describe') that appear in objective
+             meta-language but never in student answers, preventing false negatives
+             in the keyword fallback scorer.
+    @param text Raw objective string.
+    @return Set of stemmed content words excluding instruction verbs.
+    """
+    normalized = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    return {
+        _stem(word)
+        for word in normalized.split()
+        if len(word) > 2
+        and word not in _AUTO_SCORING_STOP_WORDS
+        and word not in _OBJECTIVE_INSTRUCTION_VERBS
     }
 
 
@@ -772,7 +837,7 @@ async def _find_new_objective_achievement(
     logger.info("DeepSeek API call failed. Using keyword matching fallback.")
     answer_words = _meaningful_words(answer)
     for objective_index in unearned_indexes:
-        objective_words = _meaningful_words(objectives[objective_index])
+        objective_words = _meaningful_words_from_objective(objectives[objective_index])
         matched_words = sorted(objective_words & answer_words)
         if _objective_is_achieved(objective_words, matched_words):
             return objective_index, objectives[objective_index], matched_words
@@ -795,40 +860,70 @@ def _build_objective_mini_lesson(objective_text: str, matched_words: list[str]) 
 
 
 async def _next_objective_question(
-    target_objective: str, 
-    activity_text: str = "", 
+    target_objective: str,
+    activity_text: str = "",
     previous_answer: str = "",
-    achieved_objective: Optional[str] = None
+    achieved_objective: Optional[str] = None,
+    earned_objectives: Optional[list[str]] = None,
+    total_objectives: int = 0,
 ) -> str:
     """
     @brief Returns an AI-generated guidance question to steer the student toward the next objective.
+    @details Carries full session context — already-earned objectives, the student's most recent
+             answer, and the just-achieved objective (if any) — so the tutor never loses track of
+             what has already been covered and always gives a targeted, progress-aware nudge.
+    @param target_objective  The next unearned objective text to guide the student toward.
+    @param activity_text     The full activity description shown to the student.
+    @param previous_answer   The student's most recent submitted answer.
+    @param achieved_objective Objective text the student just scored (if any), used to compliment them.
+    @param earned_objectives List of objective texts the student has already earned this session.
+    @param total_objectives  Total number of objectives in the activity (for progress framing).
+    @return A single guidance question string.
     """
+    earned_count = len(earned_objectives) if earned_objectives else 0
+
     system_prompt = (
-        "You are a friendly tutor helping a student work through an activity. "
-        "Your job is to ask ONE short, specific question that nudges the student toward the Target Objective. "
+        "You are a friendly, memory-aware tutor helping a student work through an activity. "
+        "You have full context of what the student has already answered correctly. "
+        "Your job is to ask ONE short, specific question that nudges them toward the Target Objective.\n"
         "Rules:\n"
-        "- Read the Activity text carefully. Your question must reference specific content from it.\n"
+        "- ALWAYS acknowledge progress the student has already made before asking the new question.\n"
+        "- Reference what they already got right (see 'Already earned' section below) so they feel seen.\n"
+        "- If they just scored a new point, give a warm, specific compliment about that answer.\n"
+        "- If their last answer was close but missed the target, say what was good about it and ask them "
+        "to add the specific missing detail — do NOT ignore what they said.\n"
+        "- Do NOT re-ask about objectives they have already earned.\n"
         "- Do NOT ask generic questions like 'what do you think?' or 'can you elaborate?'.\n"
-        "- Do NOT reveal the objective word-for-word. Instead ask about the concept behind it.\n"
+        "- Do NOT reveal the target objective word-for-word. Ask about the concept behind it.\n"
         "- Keep it conversational and encouraging, not formal or academic.\n"
-        "- If the student's previous answer was close, acknowledge it and ask them to be more specific.\n"
-        "- If they just earned a point, give a short warm compliment then ask about the next concept.\n"
         "Output ONLY a JSON object: {\"question\": \"...\"}."
     )
 
     user_prompt = f"Activity content:\n{activity_text}\n\n"
+
+    if earned_objectives:
+        user_prompt += (
+            f"Already earned ({earned_count}/{total_objectives} objectives):\n"
+            + "\n".join(f"  ✓ {obj}" for obj in earned_objectives)
+            + "\n\n"
+        )
+    else:
+        user_prompt += f"Already earned: 0/{total_objectives} objectives\n\n"
+
     if achieved_objective:
-        user_prompt += f"The student just correctly answered: {achieved_objective}\n"
+        user_prompt += f"Student just correctly answered about: {achieved_objective}\n"
+
     user_prompt += f"Next concept to guide them toward: {target_objective}\n"
+
     if previous_answer:
-        user_prompt += f"Student's last answer: {previous_answer}"
-    
+        user_prompt += f"Student's last answer: {previous_answer}\n"
+
     res = await call_deepseek_api(system_prompt, user_prompt)
     question = res.get("question")
-    
+
     if question:
         return question
-        
+
     return "What is one precise academic detail you can add next to strengthen your answer for this activity objective?"
 
 
@@ -1343,9 +1438,11 @@ async def submitAnswer(
                 )
                 next_question = (
                     await _next_objective_question(
-                        target_objective=objectives[next_unearned_index], 
-                        activity_text=activity.get("description", ""), 
-                        previous_answer=clean_answer
+                        target_objective=objectives[next_unearned_index],
+                        activity_text=activity.get("description", ""),
+                        previous_answer=clean_answer,
+                        earned_objectives=[objectives[i] for i in sorted(earned_indexes)],
+                        total_objectives=len(objectives),
                     )
                     if next_unearned_index is not None
                     else None
@@ -1360,12 +1457,17 @@ async def submitAnswer(
                     last_question=next_question,
                     last_answer=clean_answer,
                 )
+                scored_so_far = (
+                    f"You've scored {current_score}/{len(objectives)} objective(s) so far. "
+                    if current_score > 0
+                    else ""
+                )
                 return {
                     "score_delta": 0,
                     "score": current_score,
                     "message": (
-                        "No new objective was scored yet. Keep trying with a "
-                        "more specific academic detail."
+                        f"{scored_so_far}Your answer didn't fully cover the next concept yet — "
+                        "try adding a more specific academic detail to what you already said."
                     ),
                     "completed": False,
                     "next_question": next_question,
@@ -1431,9 +1533,11 @@ async def submitAnswer(
                 )
                 next_question = (
                     await _next_objective_question(
-                        target_objective=objectives[next_unearned_index], 
-                        activity_text=activity.get("description", ""), 
-                        previous_answer=clean_answer
+                        target_objective=objectives[next_unearned_index],
+                        activity_text=activity.get("description", ""),
+                        previous_answer=clean_answer,
+                        earned_objectives=[objectives[i] for i in sorted(latest_earned_indexes)],
+                        total_objectives=len(objectives),
                     )
                     if next_unearned_index is not None
                     else None
@@ -1509,10 +1613,12 @@ async def submitAnswer(
             )
             next_question = (
                 await _next_objective_question(
-                    target_objective=objectives[next_unearned_index], 
-                    activity_text=activity.get("description", ""), 
+                    target_objective=objectives[next_unearned_index],
+                    activity_text=activity.get("description", ""),
                     previous_answer=clean_answer,
-                    achieved_objective=objective_text
+                    achieved_objective=objective_text,
+                    earned_objectives=[objectives[i] for i in sorted(updated_earned_indexes)],
+                    total_objectives=len(objectives),
                 )
                 if next_unearned_index is not None
                 else None
@@ -2157,7 +2263,13 @@ async def getStudentActivity(
     )
     completed = bool(objectives) and current_score >= len(objectives)
     next_question = (
-        await _next_objective_question(objectives[next_unearned_index], activity.get("description", ""))
+        await _next_objective_question(
+            target_objective=objectives[next_unearned_index],
+            activity_text=activity.get("description", ""),
+            previous_answer=existing_last_answer or "",
+            earned_objectives=[objectives[i] for i in sorted(earned_indexes)],
+            total_objectives=len(objectives),
+        )
         if next_unearned_index is not None
         else None
     )
@@ -2643,7 +2755,6 @@ async def deleteCourse(
             "DELETE FROM courses WHERE id::text = $1",
             course_id,
         )
-
 
     if result == "DELETE 0":
         raise HTTPException(

@@ -129,7 +129,7 @@ const shouldUseMockFallback = (error: unknown) => {
   if (!error.response) return true;
 
   const statusCode = error.response.status;
-  const hasDemoToken = localStorage.getItem('demo_token') === 'mock-jwt-token';
+  const hasDemoToken = sessionStorage.getItem('demo_token') === 'mock-jwt-token';
   return statusCode === 404 || statusCode === 501 || (statusCode === 401 && hasDemoToken);
 };
 
@@ -242,7 +242,7 @@ const readStoredMockProgress = (key: string): MockProgress | null => {
   const memoryProgress = mockProgressByKey[key];
   if (memoryProgress) return memoryProgress;
 
-  const storedProgress = localStorage.getItem(key);
+  const storedProgress = sessionStorage.getItem(key);
   if (!storedProgress) return null;
 
   try {
@@ -251,14 +251,14 @@ const readStoredMockProgress = (key: string): MockProgress | null => {
     mockProgressByKey[key] = normalizedProgress;
     return normalizedProgress;
   } catch {
-    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
     return null;
   }
 };
 
 const persistMockProgress = (key: string, progress: MockProgress) => {
   mockProgressByKey[key] = progress;
-  localStorage.setItem(key, JSON.stringify(progress));
+  sessionStorage.setItem(key, JSON.stringify(progress));
 };
 
 const stripObjectiveFields = (raw: Record<string, unknown>): Record<string, unknown> => {

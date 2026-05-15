@@ -10,11 +10,11 @@ export const normalizeDemoRole = (role: string | null): DemoRole | null => {
 };
 
 export const getDemoRole = (): DemoRole | null => {
-  return normalizeDemoRole(localStorage.getItem(DEMO_ROLE_KEY));
+  return normalizeDemoRole(sessionStorage.getItem(DEMO_ROLE_KEY));
 };
 
 export const getDemoStudentEmail = (): string => {
-  const storedUser = localStorage.getItem(DEMO_USER_KEY);
+  const storedUser = sessionStorage.getItem(DEMO_USER_KEY);
 
   if (storedUser) {
     try {

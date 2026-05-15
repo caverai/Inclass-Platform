@@ -8,6 +8,8 @@
          Strategy: monkeypatch service-level DB calls so the scoring logic
          in submitAnswer executes fully (text matching, achievement detection,
          progress upsert) while all SQL is intercepted by mock objects.
+         call_deepseek_api is also patched to return None so the keyword
+         matching fallback runs deterministically without network I/O.
 """
 
 import json
@@ -27,7 +29,7 @@ from tests.conftest import STUDENT_ID, COURSE_ID, ACTIVITY_ID
 pytestmark = pytest.mark.acceptance
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
 def _make_student_record():
     """Build a mock asyncpg.Record for a student user row."""
@@ -74,12 +76,15 @@ def _make_inserted_score_row(total_score: int):
     return row
 
 
-# ── Full Scoring Flow ─────────────────────────────────────────────────────
+# -- Full Scoring Flow --------------------------------------------------------
 
 class TestScoringAndProgressFlow:
     """
     Acceptance scenario: seed an activity with 2 objectives, simulate
     student answers, and assert score increments and completion state.
+
+    call_deepseek_api is patched to None so the keyword-matching fallback
+    runs without any network calls.
     """
 
     OBJECTIVES = [
@@ -98,20 +103,14 @@ class TestScoringAndProgressFlow:
         mock_tx.__aexit__ = AsyncMock(return_value=False)
         mock_conn.transaction = MagicMock(return_value=mock_tx)
 
-        # fetchrow calls: 1) activity SELECT FOR UPDATE
         activity_record = _make_activity_record(self.OBJECTIVES)
         mock_conn.fetchrow = AsyncMock(side_effect=[
-            activity_record,                       # activity SELECT
-            _make_inserted_score_row(1),           # INSERT INTO objective_score_logs RETURNING
+            activity_record,
+            _make_inserted_score_row(1),
         ])
-
-        # fetch calls: 1) earned objective_score_logs (none yet)
         mock_conn.fetch = AsyncMock(return_value=[])
-
-        # execute calls: activity_scores upsert, progress upsert
         mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
 
-        # Wire the mock connection into pool.acquire()
         acq_cm = AsyncMock()
         acq_cm.__aenter__ = AsyncMock(return_value=mock_conn)
         acq_cm.__aexit__ = AsyncMock(return_value=False)
@@ -122,6 +121,8 @@ class TestScoringAndProgressFlow:
         with (
             patch.object(services, "fetch_registered_student_by_email", new_callable=AsyncMock) as mock_fetch_student,
             patch.object(services, "_ensure_student_enrolled_in_course", new_callable=AsyncMock) as mock_enroll,
+            patch.object(services, "call_deepseek_api", new_callable=AsyncMock, return_value=None),
+            patch.object(services, "_next_objective_question", new_callable=AsyncMock, return_value="What is cellular respiration?"),
         ):
             mock_fetch_student.return_value = student_record
             mock_enroll.return_value = None
@@ -151,13 +152,9 @@ class TestScoringAndProgressFlow:
         mock_conn.transaction = MagicMock(return_value=mock_tx)
 
         activity_record = _make_activity_record(self.OBJECTIVES)
-
-        # Objective 0 already earned
         earned_row_0 = _make_objective_index_row(0)
 
-        mock_conn.fetchrow = AsyncMock(side_effect=[
-            activity_record,    # activity SELECT
-        ])
+        mock_conn.fetchrow = AsyncMock(side_effect=[activity_record])
         mock_conn.fetch = AsyncMock(return_value=[earned_row_0])
         mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
 
@@ -171,6 +168,8 @@ class TestScoringAndProgressFlow:
         with (
             patch.object(services, "fetch_registered_student_by_email", new_callable=AsyncMock) as mock_fetch_student,
             patch.object(services, "_ensure_student_enrolled_in_course", new_callable=AsyncMock) as mock_enroll,
+            patch.object(services, "call_deepseek_api", new_callable=AsyncMock, return_value=None),
+            patch.object(services, "_next_objective_question", new_callable=AsyncMock, return_value="What is photosynthesis?"),
         ):
             mock_fetch_student.return_value = student_record
             mock_enroll.return_value = None
@@ -180,7 +179,6 @@ class TestScoringAndProgressFlow:
                 password="",
                 course_id=COURSE_ID,
                 activity_no=1,
-                # Answer matches objective 0 again, which is already earned
                 answer="Cellular respiration produces energy in the mitochondria",
             )
 
@@ -200,13 +198,11 @@ class TestScoringAndProgressFlow:
         mock_conn.transaction = MagicMock(return_value=mock_tx)
 
         activity_record = _make_activity_record(self.OBJECTIVES)
-
-        # Objective 0 already earned
         earned_row_0 = _make_objective_index_row(0)
 
         mock_conn.fetchrow = AsyncMock(side_effect=[
-            activity_record,                       # activity SELECT
-            _make_inserted_score_row(2),           # INSERT RETURNING (total=2)
+            activity_record,
+            _make_inserted_score_row(2),
         ])
         mock_conn.fetch = AsyncMock(return_value=[earned_row_0])
         mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
@@ -221,6 +217,7 @@ class TestScoringAndProgressFlow:
         with (
             patch.object(services, "fetch_registered_student_by_email", new_callable=AsyncMock) as mock_fetch_student,
             patch.object(services, "_ensure_student_enrolled_in_course", new_callable=AsyncMock) as mock_enroll,
+            patch.object(services, "call_deepseek_api", new_callable=AsyncMock, return_value=None),
         ):
             mock_fetch_student.return_value = student_record
             mock_enroll.return_value = None
@@ -230,7 +227,6 @@ class TestScoringAndProgressFlow:
                 password="",
                 course_id=COURSE_ID,
                 activity_no=1,
-                # Answer matches objective 1 (photosynthesis + light + glucose)
                 answer="Photosynthesis converts light energy into glucose in chloroplasts",
             )
 
@@ -251,8 +247,6 @@ class TestScoringAndProgressFlow:
         mock_conn.transaction = MagicMock(return_value=mock_tx)
 
         activity_record = _make_activity_record(self.OBJECTIVES)
-
-        # Both objectives already earned
         earned_rows = [
             _make_objective_index_row(0),
             _make_objective_index_row(1),
@@ -272,6 +266,7 @@ class TestScoringAndProgressFlow:
         with (
             patch.object(services, "fetch_registered_student_by_email", new_callable=AsyncMock) as mock_fetch_student,
             patch.object(services, "_ensure_student_enrolled_in_course", new_callable=AsyncMock) as mock_enroll,
+            patch.object(services, "call_deepseek_api", new_callable=AsyncMock, return_value=None),
         ):
             mock_fetch_student.return_value = student_record
             mock_enroll.return_value = None
@@ -329,7 +324,7 @@ class TestScoringAndProgressFlow:
             assert "ENDED" in exc_info.value.detail
 
 
-# ── getStudentActivity flow ───────────────────────────────────────────────
+# -- getStudentActivity flow --------------------------------------------------
 
 class TestGetStudentActivityFlow:
     """Acceptance tests for activity fetch with progress state."""
@@ -344,11 +339,17 @@ class TestGetStudentActivityFlow:
         activity_record = _make_activity_record(self.OBJECTIVES)
         student_record = _make_student_record()
 
-        # Pool-level fetch/fetchrow for getStudentActivity (uses pool directly)
-        mock_db_pool.fetchrow = AsyncMock(return_value=activity_record)
+        # pool.fetchrow is called 3 times:
+        #   1) activity SELECT
+        #   2) manual_score SELECT (None => no override)
+        #   3) existing_progress SELECT (None => no prior answer)
+        mock_db_pool.fetchrow = AsyncMock(side_effect=[
+            activity_record,
+            None,
+            None,
+        ])
         mock_db_pool.fetch = AsyncMock(return_value=[])
 
-        # For _upsert_student_activity_progress (uses pool.acquire)
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
         acq_cm = AsyncMock()
@@ -359,6 +360,7 @@ class TestGetStudentActivityFlow:
         with (
             patch.object(services, "fetch_registered_student_by_email", new_callable=AsyncMock) as mock_fetch,
             patch.object(services, "_ensure_student_enrolled_in_course", new_callable=AsyncMock) as mock_enroll,
+            patch.object(services, "_next_objective_question", new_callable=AsyncMock, return_value="What is cellular respiration?"),
         ):
             mock_fetch.return_value = student_record
             mock_enroll.return_value = None

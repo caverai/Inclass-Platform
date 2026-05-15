@@ -15,11 +15,11 @@ export const StudentLoginPage: React.FC = () => {
       setIsLoading(true);
       const { token } = await authApi.googleSignIn('STUDENT', credential);
 
-      localStorage.setItem('student_token', token);
-      localStorage.setItem(DEMO_ROLE_KEY, 'student');
+      sessionStorage.setItem('student_token', token);
+      sessionStorage.setItem(DEMO_ROLE_KEY, 'student');
 
       const me = await authApi.getMe();
-      localStorage.setItem(DEMO_USER_KEY, JSON.stringify(me));
+      sessionStorage.setItem(DEMO_USER_KEY, JSON.stringify(me));
 
       navigate('/student/dashboard');
     } catch (err: any) {

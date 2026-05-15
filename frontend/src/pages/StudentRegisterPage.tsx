@@ -31,11 +31,11 @@ export const StudentRegisterPage: React.FC = () => {
       setIsLoading(true);
       const { token } = await authApi.studentRegister(fullName, email, password, confirmPassword);
 
-      localStorage.setItem('student_token', token);
-      localStorage.setItem('demo_role', 'student');
-      
+      sessionStorage.setItem('student_token', token);
+      sessionStorage.setItem('demo_role', 'student');
+
       const me = await authApi.getMe();
-      localStorage.setItem('demo_user', JSON.stringify(me));
+      sessionStorage.setItem('demo_user', JSON.stringify(me));
 
       navigate('/student/dashboard');
     } catch (err: any) {

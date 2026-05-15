@@ -8,7 +8,7 @@
  * - Redirects to the login page **only on genuine auth failures (401/403)**.
  *   Network errors or server blips do NOT trigger a redirect so that an F5
  *   refresh does not log the user out unexpectedly.
- * - Pre-populates the user from `localStorage` (DEMO_USER_KEY) immediately so
+ * - Pre-populates the user from `sessionStorage` (DEMO_USER_KEY) immediately so
  *   there is no blank-header flash while the `/auth/me` call is in flight.
  *
  * ## SOLID notes
@@ -41,7 +41,7 @@ const getHomePath = (role: User['role']) => {
 };
 
 /**
- * @brief Reads the cached user from localStorage without a network call.
+ * @brief Reads the cached user from sessionStorage without a network call.
  *
  * Used to populate the header immediately on mount / F5 so there is no
  * flash of an empty name while `/auth/me` is in flight.
@@ -50,7 +50,7 @@ const getHomePath = (role: User['role']) => {
  */
 const getCachedUser = (): User | null => {
   try {
-    const raw = localStorage.getItem(DEMO_USER_KEY);
+    const raw = sessionStorage.getItem(DEMO_USER_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as User;
   } catch {
@@ -104,7 +104,7 @@ export const Layout: React.FC = () => {
         const currentUser = await authApi.getMe();
 
         // Persist fresh data so the next F5 pre-populates from an up-to-date value.
-        localStorage.setItem(DEMO_USER_KEY, JSON.stringify(currentUser));
+        sessionStorage.setItem(DEMO_USER_KEY, JSON.stringify(currentUser));
         setUser(currentUser);
 
         // Cross-role redirect: student trying to access /instructor/* etc.
@@ -115,11 +115,11 @@ export const Layout: React.FC = () => {
       } catch (err) {
         if (isAuthError(err)) {
           // 401/403 — token is genuinely invalid or expired. Clear and redirect.
-          localStorage.removeItem('instructor_token');
-          localStorage.removeItem('student_token');
-          localStorage.removeItem('demo_token');
-          localStorage.removeItem(DEMO_ROLE_KEY);
-          localStorage.removeItem(DEMO_USER_KEY);
+          sessionStorage.removeItem('instructor_token');
+          sessionStorage.removeItem('student_token');
+          sessionStorage.removeItem('demo_token');
+          sessionStorage.removeItem(DEMO_ROLE_KEY);
+          sessionStorage.removeItem(DEMO_USER_KEY);
           setUser(null);
           navigate('/student/login', { replace: true });
         }
@@ -146,11 +146,11 @@ export const Layout: React.FC = () => {
   }
 
   const handleLogout = () => {
-    localStorage.removeItem('instructor_token');
-    localStorage.removeItem('student_token');
-    localStorage.removeItem('demo_token');
-    localStorage.removeItem(DEMO_ROLE_KEY);
-    localStorage.removeItem(DEMO_USER_KEY);
+    sessionStorage.removeItem('instructor_token');
+    sessionStorage.removeItem('student_token');
+    sessionStorage.removeItem('demo_token');
+    sessionStorage.removeItem(DEMO_ROLE_KEY);
+    sessionStorage.removeItem(DEMO_USER_KEY);
     navigate('/student/login');
   };
 

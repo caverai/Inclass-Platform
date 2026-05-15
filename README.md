@@ -155,7 +155,7 @@ The platform supports two authentication methods for both roles:
 
 Both paths return the same `AuthResponse` and issue identical JWTs.
 
-Tokens are stored in `localStorage` and injected into all API calls by the Axios client:
+Tokens are stored in `sessionStorage` (tab-scoped — each browser tab holds an independent session) and injected into all API calls by the Axios client:
 
 | Key | Written by | Used for |
 |---|---|---|

@@ -15,11 +15,11 @@ export const apiClient = axios.create({
  * logging in as one role never clobbers the other's session.
  */
 const getActiveToken = (): string | null => {
-  const role = localStorage.getItem('demo_role');
-  if (role === 'instructor') return localStorage.getItem('instructor_token');
-  if (role === 'student')    return localStorage.getItem('student_token');
+  const role = sessionStorage.getItem('demo_role');
+  if (role === 'instructor') return sessionStorage.getItem('instructor_token');
+  if (role === 'student')    return sessionStorage.getItem('student_token');
   // Fallback: legacy single-key token (handles any in-flight sessions)
-  return localStorage.getItem('demo_token');
+  return sessionStorage.getItem('demo_token');
 };
 
 apiClient.interceptors.request.use((config) => {
