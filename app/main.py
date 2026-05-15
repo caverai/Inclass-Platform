@@ -20,7 +20,7 @@ load_dotenv()
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_requests
@@ -111,6 +111,19 @@ app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR, html=True), name="fro
 async def frontend_root() -> RedirectResponse:
     """Redirects root requests to the browser frontend."""
     return RedirectResponse(url="/frontend/")
+
+
+@app.get("/frontend/{rest_of_path:path}", include_in_schema=False)
+async def frontend_spa_fallback(rest_of_path: str):
+    """
+    Catch-all route for the frontend SPA.
+    If a request to /frontend/some/path doesn't match a static file,
+    serve index.html so React Router can handle the deep link.
+    """
+    index_path = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return HTMLResponse("Frontend not built. Please run 'npm run build' in the frontend directory.")
 
 class GoogleTokenRequest(BaseModel):
     """

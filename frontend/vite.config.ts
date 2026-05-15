@@ -15,10 +15,34 @@ export default defineConfig({
     // returns {"detail":"Not Found"} for routes that only exist in the frontend.
     historyApiFallback: true,
     proxy: {
-      '/auth': 'http://localhost:8000',
-      '/student': 'http://localhost:8000',
-      '/instructor': 'http://localhost:8000',
-      '/health': 'http://localhost:8000',
+      '/auth': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/student': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        bypass: (req) => {
+          // If the request is for a page (Accept includes text/html), don't proxy it.
+          // This allows React Router to handle the URL after Vite serves index.html.
+          if (req.headers.accept?.includes('text/html')) {
+            return '/index.html';
+          }
+        },
+      },
+      '/instructor': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        bypass: (req) => {
+          if (req.headers.accept?.includes('text/html')) {
+            return '/index.html';
+          }
+        },
+      },
+      '/health': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })
