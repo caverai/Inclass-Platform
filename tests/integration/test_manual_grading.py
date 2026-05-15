@@ -125,3 +125,29 @@ class TestManualGrading:
         )
 
         assert resp.status_code == 401
+
+    async def test_manual_grade_allowed_for_ended_activity(
+        self, async_client, mock_db_pool, override_instructor_dep
+    ):
+        """Instructor can submit a manual grade even after activity is ENDED (US-L exceptional case)."""
+        fake_result = {
+            "status": "success",
+            "message": "Manual grade of 3.0 successfully logged for student@mef.edu.tr.",
+        }
+        with patch(
+            "app.main.submitManualGrade", new_callable=AsyncMock
+        ) as mock_grade:
+            mock_grade.return_value = fake_result
+
+            resp = await async_client.post(
+                f"/instructor/activity/{COURSE_ID}/1/grade/manual",
+                json={
+                    "student_email": "student@mef.edu.tr",
+                    "score": 3.0,
+                    "note": "Submitted after activity ended — exceptional case.",
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "success"

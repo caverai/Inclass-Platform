@@ -1893,8 +1893,8 @@ async def submitManualGrade(
     @param note Optional free-text note stored alongside the grade.
     @return Dictionary with keys: status, message.
     @throws HTTPException 400 If score is outside the valid range.
-    @throws HTTPException 403 If instructor is not assigned to the course, activity is
-                             ENDED, or student is not enrolled in the course.
+    @throws HTTPException 403 If instructor is not assigned to the course or student is
+                             not enrolled in the course.
     @throws HTTPException 404 If the activity or student does not exist.
     """
     pool = db_pool
@@ -1913,12 +1913,6 @@ async def submitManualGrade(
 
     if not activity:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found.")
-
-    if activity["status"] == "ENDED":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Cannot submit manual grades for an ended or reset activity."
-        )
 
     student = await fetch_registered_student_by_email(pool, student_email)
 
